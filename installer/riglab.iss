@@ -50,7 +50,7 @@ Name: "{autodesktop}\RigLab"; Filename: "{app}\RigLab.exe"; Tasks: desktopicon
 ; RigLab needs administrator rights, so "start with Windows" is a scheduled task (a normal Run key can't elevate)
 Filename: "schtasks.exe"; Parameters: "/Create /F /TN ""RigLab"" /SC ONLOGON /RL HIGHEST /TR ""\""{app}\RigLab.exe\"" --minimized"""; Flags: runhidden; Tasks: autostart
 Filename: "schtasks.exe"; Parameters: "/Delete /F /TN ""RigLab"""; Flags: runhidden; Tasks: not autostart
-Filename: "{app}\RigLab.exe"; Description: "Start RigLab now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\RigLab.exe"; Description: "Start RigLab now"; Flags: nowait postinstall skipifsilent shellexec runascurrentuser
 
 [UninstallRun]
 Filename: "taskkill.exe"; Parameters: "/F /IM RigLab.exe"; Flags: runhidden; RunOnceId: "KillRigLab"
