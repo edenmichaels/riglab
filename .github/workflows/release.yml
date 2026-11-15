@@ -16,6 +16,7 @@ jobs:
     env:
       CI: "true"
       PYTHONUTF8: "1"
+      HAS_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,7 +53,7 @@ jobs:
       # Code signing: runs only once a certificate is added as repository secrets
       # (WINDOWS_CERT_PFX_BASE64 and WINDOWS_CERT_PASSWORD). Unsigned builds still work.
       - name: Sign installer
-        if: env.CERT != ''
+        if: env.HAS_CERT == 'true'
         env:
           CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
           CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -71,12 +72,17 @@ jobs:
           $f = Get-ChildItem Installer\RigLab-Setup-*.exe
           "$((Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower())  $($f.Name)" | Out-File -Encoding ascii "Installer\$($f.Name).sha256"
 
+      - name: Collect build log
+        if: always()
+        shell: pwsh
+        run: Copy-Item "$env:LOCALAPPDATA\RigLab-build\build.log" build.log -ErrorAction SilentlyContinue
+
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: ${{ env.LOCALAPPDATA }}\RigLab-build\build.log
+          path: build.log
           if-no-files-found: ignore
 
       - name: Upload installer
