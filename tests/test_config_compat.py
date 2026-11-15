@@ -12,6 +12,8 @@ def test_old_settings_get_new_defaults(tmp_path):
     f.write_text(json.dumps(old), encoding="utf-8")
     c = Config(f)
     assert c["overlay"]["show_fps"] is False            # new feature off by default
+    assert c["overlay"]["mode"] == "full" and c["overlay"]["size"] == "m"   # looks exactly like before
+    assert c["overlay"]["x"] is None and c["overlay"]["opacity"] == 0.85    # still uses its corner
     assert c["overlay"]["enabled"] is True and c["overlay"]["corner"] == "top-right"
     assert c["fan_curves"] == old["fan_curves"]          # old fan curves unchanged
 

@@ -145,6 +145,41 @@ App.pages.health = {
 };
 
 // =================================================================== Settings
+function overlayCard(ov) {
+  ov.mode = ov.mode || "full"; ov.size = ov.size || "m"; ov.fps_color = ov.fps_color || "auto";
+  if (ov.opacity == null) ov.opacity = 0.85;
+  const box = h("div.card");
+  const STYLES = [["full", "Full stats (CPU, GPU, RAM)"], ["fps", "FPS counter: number only"], ["fps_low", "FPS counter: + 1% low"],
+    ["fps_time", "FPS counter: + frame time"], ["fps_detail", "FPS counter: detailed (1% low, frame time, game)"], ["fps_graph", "FPS counter: + frame-time graph"]];
+  let moving = false;
+  const moveBtn = h("button.btn.sm", { onclick: async () => {
+    const r = await App.api.overlay_edit(!moving); moving = !!r.edit; ov.enabled = true;
+    moveBtn.replaceChildren(icon(moving ? "check" : "move"), moving ? "Done moving" : "Move overlay");
+    toast(moving ? "Drag the overlay where you want it, then click Done" : "Position saved"); draw(); } }, icon("move"), "Move overlay");
+  const draw = () => {
+    const counter = ov.mode !== "full";
+    box.replaceChildren(cardHead("In-game overlay", "overlay"),
+      h("div.sub", "Small always-on-top stats box. Works over games in borderless/windowed mode (not exclusive fullscreen). Clicks pass straight through it, except while you're moving it."),
+      h("div.opt", h("div.t", "Show overlay"), switchEl(ov.enabled, v => { ov.enabled = v; })),
+      h("div.opt", h("div.t", "Style"), h("select", { "aria-label": "Overlay style", onchange: e => { ov.mode = e.target.value; draw(); } },
+        STYLES.map(([k, l]) => h("option", { value: k, selected: ov.mode === k }, l)))),
+      !counter ? h("div.opt", h("div", h("div.t", "Show FPS"), h("div.d", "Adds an FPS row (FPS, 1% low, frame time) for the game in front, measured with PresentMon.")),
+        switchEl(!!ov.show_fps, v => { ov.show_fps = v; })) : h("div.small.muted", { style: { padding: "2px 0 8px" } }, "FPS is measured with PresentMon only while the overlay is showing. The counter hides itself when no game is in front."),
+      h("div.opt", h("div.t", "Text size"), h("select", { "aria-label": "Overlay text size", onchange: e => { ov.size = e.target.value; } },
+        [["s", "Small"], ["m", "Medium"], ["l", "Large"], ["xl", "Extra large"]].map(([k, l]) => h("option", { value: k, selected: ov.size === k }, l)))),
+      h("div.opt", h("div.t", "FPS colour"), h("select", { "aria-label": "FPS colour", onchange: e => { ov.fps_color = e.target.value; } },
+        [["auto", "By performance (green / yellow / red)"], ["white", "White"], ["accent", "Cyan"]].map(([k, l]) => h("option", { value: k, selected: ov.fps_color === k }, l)))),
+      h("div", { style: { padding: "6px 0" } }, sliderRow("Background", 0, 100, Math.round(ov.opacity * 100), 5, "%", v => { ov.opacity = v / 100; })),
+      h("div.opt", h("div", h("div.t", "Position"), h("div.d", ov.x != null ? "Where you dragged it" : "Corner: " + (ov.corner || "top-left"))),
+        h("div.row", { style: { gap: "6px" } }, moveBtn,
+          h("select", { "aria-label": "Snap overlay to a corner", onchange: async e => { if (!e.target.value) return; ov.corner = e.target.value; ov.x = ov.y = null; await App.api.overlay_corner(e.target.value); toast("Snapped to " + e.target.value); draw(); } },
+            h("option", { value: "" }, "Snap to corner…"), ["top-left", "top-right", "bottom-left", "bottom-right"].map(k => h("option", { value: k }, k))))),
+      h("div.small.faint", "Style, size, colour and background apply when you press Save."));
+  };
+  draw();
+  return box;
+}
+
 function appearanceCard(c) {
   const ui = c.ui || (c.ui = { theme: "dark", accent: "cyan", start_page: "home" });
   const box = h("div.card");
@@ -184,12 +219,7 @@ App.pages.settings = {
           sliderRow("CPU", 60, 105, a.cpu_temp_max, 1, "°C", v => { a.cpu_temp_max = v; }),
           sliderRow("GPU", 60, 100, a.gpu_temp_max, 1, "°C", v => { a.gpu_temp_max = v; }),
           sliderRow("Drives", 40, 80, a.drive_temp_max, 1, "°C", v => { a.drive_temp_max = v; }))),
-      h("div.card", cardHead("In-game overlay", "overlay"), h("div.sub", "Small always-on-top stats box. Works over games in borderless/windowed mode (not exclusive fullscreen). Clicks pass straight through it."),
-        h("div.opt", h("div.t", "Show overlay"), switchEl(ov.enabled, v => { ov.enabled = v; })),
-        h("div.opt", h("div", h("div.t", "Show FPS"), h("div.d", "FPS, 1% low and frame time for the game in front, measured with PresentMon. Only runs while the overlay is showing.")),
-          switchEl(!!ov.show_fps, v => { ov.show_fps = v; })),
-        h("div.opt", h("div.t", "Corner"), h("select", { onchange: e => { ov.corner = e.target.value; } },
-          ["top-left", "top-right", "bottom-left", "bottom-right"].map(k => h("option", { selected: ov.corner === k }, k))))),
+      overlayCard(ov),
       h("div.card", cardHead("General", "gear"),
         h("div.opt", h("div", h("div.t", "Keep running in the tray"), h("div.d", "Closing the window keeps alerts and fan curves working.")), switchEl(c.minimize_to_tray, v => { c.minimize_to_tray = v; })),
         h("div.opt", h("div", h("div.t", "Start minimised")), switchEl(c.start_minimized, v => { c.start_minimized = v; })),

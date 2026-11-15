@@ -17,7 +17,7 @@ from dataclasses import asdict
 from .core import bench, crashes, diagnostics, lhm_setup, oc, report, sysinfo, tweaks
 from .core.config import APP_VERSION, app_dir
 from .core.fans import PRESETS
-from .core import fx, gpuresults, gpusetup, gputune, ledmap, presentmon
+from .core import fx, gpuresults, gpusetup, gputune, ledmap, overlay, presentmon
 from .core.lighting import ORDERS, PORT
 from .core.rgb import CORSAIR_LED_COUNTS, EFFECTS
 from .core.stress import StressTest
@@ -259,10 +259,27 @@ class Api:
         self._gpurun.stop(score)
         return True
 
+    def overlay_config(self):
+        """What the overlay page should draw (re-read every tick, so Settings changes show up live)."""
+        o = self._cfg["overlay"]
+        return {"mode": overlay.norm_mode(o.get("mode")), "show_fps": bool(o.get("show_fps")), "size": o.get("size", "m"),
+                "opacity": float(o.get("opacity", 0.85)), "fps_color": o.get("fps_color", "auto"), "edit": self._app._ov_edit}
+
+    def overlay_edit(self, on):
+        return self._app.overlay_edit(bool(on))
+
+    def overlay_corner(self, corner):
+        self._app.overlay_corner(corner)
+        return True
+
+    def overlay_fit(self, w, h):
+        self._app.overlay_fit(w, h)
+        return True
+
     def overlay_fps(self):
         """FPS row for the overlay: {"state": "off" | "unavailable" | "no_game"} or {"state": "ok", fps, low1, frametime, app}."""
         o = self._cfg["overlay"]
-        if not (o.get("enabled") and o.get("show_fps")):
+        if not overlay.needs_fps(o):
             return {"state": "off"}
         try:
             cap = self._app.ensure_overlay_fps()
@@ -710,6 +727,9 @@ class Api:
         return self._cfg.data
 
     def save_settings(self, data):
+        if isinstance(data.get("overlay"), dict):
+            data["overlay"] = {k: v for k, v in data["overlay"].items() if k not in ("x", "y")}   # moved only by dragging
+            self._app._ov_size = None                 # style/size may have changed: let the overlay re-measure
         for k in ("alerts", "overlay", "logging", "openrgb", "liquidctl"):
             if k in data:
                 self._cfg[k].update(data[k])

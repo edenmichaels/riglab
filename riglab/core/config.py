@@ -53,7 +53,8 @@ DEFAULTS: dict = {
     "liquidctl": {"enabled": True, "exclude": []},
     "fan_curves": {},          # control_id -> {"source": sensor_id, "points": [[temp, pct], ...]}
     "rgb_profiles": {},        # name -> {device_name: "#rrggbb"}
-    "overlay": {"enabled": False, "sensors": [], "corner": "top-left", "opacity": 0.85, "show_fps": False},
+    "overlay": {"enabled": False, "sensors": [], "corner": "top-left", "opacity": 0.85, "show_fps": False,
+                "mode": "full", "size": "m", "fps_color": "auto", "x": None, "y": None},
     "ui": {"theme": "dark", "accent": "cyan", "start_page": "home"},
 }
 

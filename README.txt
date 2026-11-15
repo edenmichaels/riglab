@@ -2,8 +2,11 @@ RigLab 3.7.0
 ============
 
 NEW IN 3.7.0
-  In-game overlay can show FPS, 1% low and frame time for the game in front
-  (Settings -> In-game overlay -> Show FPS; off by default, fully offline).
+  In-game overlay (Settings -> In-game overlay):
+  - Show FPS: FPS, 1% low and frame time for the game in front (off by default, fully offline)
+  - Styles: full stats, or an FPS counter (number only, + 1% low, + frame time, detailed, + graph)
+  - Move overlay: drag it anywhere on any screen (also in the tray menu); or snap to a corner
+  - Text size, FPS colour and background transparency (0% = text only)
 
 INSTALL (once)
   1. Right-click the zip -> Extract All.

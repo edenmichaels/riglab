@@ -12,7 +12,7 @@ class DemoApi {
     this.stress = null;
     this.gpuRes = null;
     this.cfg = { alerts: { enabled: true, cpu_temp_max: 90, gpu_temp_max: 85, drive_temp_max: 65, cooldown_seconds: 120 },
-      overlay: { enabled: false, corner: "top-left", opacity: 0.85, show_fps: false }, logging: { enabled: false, interval_s: 5 },
+      overlay: { enabled: false, corner: "top-left", opacity: 0.85, show_fps: false, mode: "full", size: "m", fps_color: "auto", x: null, y: null }, logging: { enabled: false, interval_s: 5 },
       openrgb: { host: "127.0.0.1", port: 6742 }, minimize_to_tray: true, start_minimized: false, poll_interval_ms: 1000 };
     this.defs = this.makeDefs();
     for (let i = 0; i < 120; i++) this.sample(-120 + i);
@@ -280,6 +280,10 @@ class DemoApi {
         temp_avg: avg(col(3)), temp_max: Math.max(...col(3)), hotspot_max: Math.max(...col(5)), hotspot_delta_max: 16, usage_avg: 98, pct_power_limited: k > 1 ? 62 : 85, pct_thermal_limited: k > 1 ? 18 : 0,
         fan_pct_max: 68, vram_used_max: 6900, vram_total: 12288, spikes: k > 1 ? 9 : 4, driver_resets: 0, app: "Heaven.exe" }, trace: tr };
   }
+  async overlay_config() { const o = this.cfg?.overlay || {}; return { mode: o.mode || "full", show_fps: !!o.show_fps, size: o.size || "m", opacity: o.opacity ?? 0.85, fps_color: o.fps_color || "auto", edit: !!this.ovEdit }; }
+  async overlay_edit(on) { this.ovEdit = !!on; return { edit: this.ovEdit, x: on ? null : 400, y: on ? null : 60 }; }
+  async overlay_corner() { return true; }
+  async overlay_fit() { return true; }
   async overlay_fps() {
     const t = Date.now() / 1000, fps = 141 + Math.round(Math.sin(t) * 6);
     return { state: "ok", app: "Cyberpunk2077.exe", fps, low1: 104 + Math.round(Math.sin(t / 3) * 4), frametime: +(1000 / fps).toFixed(2) };
