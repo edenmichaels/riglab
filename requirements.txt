@@ -8,3 +8,4 @@ nvidia-ml-py>=12.535
 openrgb-python>=0.3.0
 liquidctl>=1.13
 hidapi
+cryptography>=42
