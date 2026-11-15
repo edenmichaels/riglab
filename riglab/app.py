@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 
 import webview
 
@@ -58,7 +59,8 @@ class App:
             background_color="#0a0c11", text_select=False, hidden=self.config["start_minimized"] or "--minimized" in sys.argv)
         self.window.events.closing += self._on_closing
         self.overlay = webview.create_window(
-            "RigLab Overlay", str(WEB / "overlay.html"), js_api=self.api, width=300, height=110,
+            "RigLab Overlay", str(WEB / "overlay.html"), js_api=self.api, width=300,
+            height=136 if self.config["overlay"].get("show_fps") else 110,
             frameless=True, on_top=True, transparent=True, easy_drag=False, hidden=True, focus=False)
         self.overlay.events.shown += self._make_clickthrough
         self._start_tray()
@@ -143,6 +145,11 @@ class App:
             self.api._stress.stop("app closed")
         self.fans.release_all()     # fans back to BIOS / hub defaults
         try:
+            from .core import presentmon
+            presentmon.release_all()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             self.api._gpu.stop()
         except Exception:  # noqa: BLE001
             pass
@@ -191,10 +198,12 @@ class App:
         if not self.overlay:
             return
         o = self.config["overlay"]
+        fps = bool(o.get("show_fps"))
         if o["enabled"]:
             try:
                 scr = webview.screens[0]
-                w, h, m = 300, 110, 12
+                w, h, m = 300, (136 if fps else 110), 12
+                self.overlay.resize(w, h)
                 x = m if "left" in o["corner"] else scr.width - w - m
                 y = m if "top" in o["corner"] else scr.height - h - m - 48
                 self.overlay.move(x, y)
@@ -203,6 +212,32 @@ class App:
             self.overlay.show()
         else:
             self.overlay.hide()
+        self._sync_overlay_fps()
+
+    def _sync_overlay_fps(self):
+        """PresentMon runs for the overlay only while the overlay is visible AND Show FPS is on."""
+        from .core import presentmon
+        o = self.config["overlay"]
+        if o["enabled"] and o.get("show_fps") and not self._quitting:
+            self._fps_retry_at = 0.0
+            threading.Thread(target=self.ensure_overlay_fps, name="OverlayFPS", daemon=True).start()
+        else:
+            presentmon.release("overlay")
+
+    def ensure_overlay_fps(self):
+        """(Re)join the shared capture for the overlay; retried at most every 30 s if PresentMon can't run."""
+        from .core import presentmon
+        o = self.config["overlay"]
+        if not (o["enabled"] and o.get("show_fps")) or self._quitting:
+            return None
+        cap = presentmon.shared()
+        if cap and "overlay" in presentmon.holders():
+            return cap
+        if time.monotonic() < getattr(self, "_fps_retry_at", 0.0):
+            return None
+        self._fps_retry_at = time.monotonic() + 30
+        presentmon.release("overlay")                 # drop a dead capture before trying again
+        return presentmon.acquire("overlay")
 
     def toggle_overlay(self):
         self.config["overlay"]["enabled"] = not self.config["overlay"]["enabled"]

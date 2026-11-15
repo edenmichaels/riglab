@@ -17,7 +17,7 @@ from dataclasses import asdict
 from .core import bench, crashes, diagnostics, lhm_setup, oc, report, sysinfo, tweaks
 from .core.config import APP_VERSION, app_dir
 from .core.fans import PRESETS
-from .core import fx, gpuresults, gpusetup, gputune, ledmap
+from .core import fx, gpuresults, gpusetup, gputune, ledmap, presentmon
 from .core.lighting import ORDERS, PORT
 from .core.rgb import CORSAIR_LED_COUNTS, EFFECTS
 from .core.stress import StressTest
@@ -258,6 +258,20 @@ class Api:
     def gpu_run_stop(self, score=None):
         self._gpurun.stop(score)
         return True
+
+    def overlay_fps(self):
+        """FPS row for the overlay: {"state": "off" | "unavailable" | "no_game"} or {"state": "ok", fps, low1, frametime, app}."""
+        o = self._cfg["overlay"]
+        if not (o.get("enabled") and o.get("show_fps")):
+            return {"state": "off"}
+        try:
+            cap = self._app.ensure_overlay_fps()
+            if not cap:
+                return {"state": "unavailable"}
+            return cap.reading_for(presentmon.foreground_pid())
+        except Exception:  # noqa: BLE001 - the overlay must never show errors
+            log.exception("overlay fps")
+            return {"state": "unavailable"}
 
     def gpu_results(self, run_id=None, base_id=None):
         return gpuresults.report(run_id, base_id)

@@ -186,6 +186,8 @@ App.pages.settings = {
           sliderRow("Drives", 40, 80, a.drive_temp_max, 1, "°C", v => { a.drive_temp_max = v; }))),
       h("div.card", cardHead("In-game overlay", "overlay"), h("div.sub", "Small always-on-top stats box. Works over games in borderless/windowed mode (not exclusive fullscreen). Clicks pass straight through it."),
         h("div.opt", h("div.t", "Show overlay"), switchEl(ov.enabled, v => { ov.enabled = v; })),
+        h("div.opt", h("div", h("div.t", "Show FPS"), h("div.d", "FPS, 1% low and frame time for the game in front, measured with PresentMon. Only runs while the overlay is showing.")),
+          switchEl(!!ov.show_fps, v => { ov.show_fps = v; })),
         h("div.opt", h("div.t", "Corner"), h("select", { onchange: e => { ov.corner = e.target.value; } },
           ["top-left", "top-right", "bottom-left", "bottom-right"].map(k => h("option", { selected: ov.corner === k }, k))))),
       h("div.card", cardHead("General", "gear"),

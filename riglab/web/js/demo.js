@@ -12,7 +12,7 @@ class DemoApi {
     this.stress = null;
     this.gpuRes = null;
     this.cfg = { alerts: { enabled: true, cpu_temp_max: 90, gpu_temp_max: 85, drive_temp_max: 65, cooldown_seconds: 120 },
-      overlay: { enabled: false, corner: "top-left", opacity: 0.85 }, logging: { enabled: false, interval_s: 5 },
+      overlay: { enabled: false, corner: "top-left", opacity: 0.85, show_fps: false }, logging: { enabled: false, interval_s: 5 },
       openrgb: { host: "127.0.0.1", port: 6742 }, minimize_to_tray: true, start_minimized: false, poll_interval_ms: 1000 };
     this.defs = this.makeDefs();
     for (let i = 0; i < 120; i++) this.sample(-120 + i);
@@ -89,7 +89,7 @@ class DemoApi {
     return v.toFixed(1) + " " + d.unit;
   }
   // ------------------------------------------------------------ api
-  async info() { return { ui: this.uiCfg || {}, version: "3.6.1", admin: true, platform: "win32", demo: true, status: this.status() }; }
+  async info() { return { ui: this.uiCfg || {}, version: "3.7.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
   status() { return { "LibreHardwareMonitor": "active", "liquidctl (fan hubs / AIOs)": "active", "NVIDIA NVML": "active", psutil: "active" }; }
   async snapshot() {
     this.sample(0);
@@ -279,6 +279,10 @@ class DemoApi {
         clock_avg: avg(col(1)), clock_max: Math.max(...col(1)), clock_p5: Math.min(...col(1)), clock_drop_pct: k > 1 ? 9.4 : 4.1, vram_clock_avg: avg(col(7)), power_avg: pw, power_max: Math.max(...col(2)), power_limit: k > 1 ? 182 : 170,
         temp_avg: avg(col(3)), temp_max: Math.max(...col(3)), hotspot_max: Math.max(...col(5)), hotspot_delta_max: 16, usage_avg: 98, pct_power_limited: k > 1 ? 62 : 85, pct_thermal_limited: k > 1 ? 18 : 0,
         fan_pct_max: 68, vram_used_max: 6900, vram_total: 12288, spikes: k > 1 ? 9 : 4, driver_resets: 0, app: "Heaven.exe" }, trace: tr };
+  }
+  async overlay_fps() {
+    const t = Date.now() / 1000, fps = 141 + Math.round(Math.sin(t) * 6);
+    return { state: "ok", app: "Cyberpunk2077.exe", fps, low1: 104 + Math.round(Math.sin(t / 3) * 4), frametime: +(1000 / fps).toFixed(2) };
   }
   async gpu_results(runId, baseId) {
     const rs = (this.gtRuns && this.gtRuns.length >= 1) ? this.gtRuns : (this.gtRuns = [this.demoRun(1, "Before", 1, 864e5), this.demoRun(2, "After", 1.07, 36e5)]);

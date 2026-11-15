@@ -850,14 +850,13 @@ class RunRecorder:
         proc, fps_builtin, cap = None, None, None
         try:
             if c["source"] != "builtin":
-                from .presentmon import Capture
+                from . import presentmon
                 c["msg"] = "Starting frame-rate capture…"
-                cap = Capture()
-                if cap.start():
+                cap = presentmon.acquire("benchmark", record=True, allow_download=True)   # shared with the overlay
+                if cap:
                     self.tuner.fps = cap
                 else:
-                    c["warning"] = cap.error
-                    cap = None
+                    c["warning"] = "PresentMon isn't available (offline?) - FPS won't be recorded for this run."
             if c["source"] == "builtin":
                 self.app.open_gpu_window("bench", c["seconds"])
                 c["msg"] = "Running RigLab's 3D benchmark…"
@@ -893,9 +892,10 @@ class RunRecorder:
         finally:
             pm = {}
             if cap:
-                cap.stop()
                 pm = cap.stats()
                 self.tuner.fps = None
+                from . import presentmon
+                presentmon.release("benchmark")        # PresentMon keeps running if the overlay still needs it
             c["running"] = False
             c["stats"] = summarize(c["samples"], fps_builtin or (pm or None), c.get("score"))
             if pm:
