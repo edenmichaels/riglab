@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>RigLab GPU test</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font:15px "Segoe UI",sans-serif;color:#fff}
+canvas{width:100%;height:100%;display:block}
+#hud{position:fixed;left:14px;top:14px;background:rgba(0,0,0,.6);padding:9px 14px;border-radius:9px;font-family:Consolas,monospace}
+</style></head>
+<body><canvas id="c"></canvas><div id="hud">Starting…</div>
+<script>
+"use strict";
+/* Heavy ray-marched Mandelbulb. Several frames are drawn per animation frame and timed with a
+   pixel read-back, so the score isn't capped at your monitor's refresh rate. */
+const FRAG = `#version 300 es
+precision highp float;
+out vec4 frag; uniform float iTime; uniform vec2 iRes; uniform int ITER;
+float bulb(vec3 p, out float trap){ vec3 z=p; float dr=1.0, r=0.0, pw=8.0+2.0*sin(iTime*0.2); trap=1e9;
+  for(int i=0;i<12;i++){ r=length(z); if(r>2.0) break; float th=acos(clamp(z.z/r,-1.0,1.0)), ph=atan(z.y,z.x);
+    dr=pow(r,pw-1.0)*pw*dr+1.0; float zr=pow(r,pw); th*=pw; ph*=pw;
+    z=zr*vec3(sin(th)*cos(ph),sin(ph)*sin(th),cos(th))+p; trap=min(trap,dot(z,z)); }
+  return 0.5*log(r)*r/dr; }
+float map(vec3 p){ float t; return bulb(p,t); }
+vec3 nrm(vec3 p){ vec2 e=vec2(0.0005,0.0); return normalize(vec3(map(p+e.xyy)-map(p-e.xyy),map(p+e.yxy)-map(p-e.yxy),map(p+e.yyx)-map(p-e.yyx))); }
+float shadow(vec3 ro, vec3 rd){ float res=1.0, t=0.01; for(int i=0;i<64;i++){ if(i>=ITER/2) break; float h=map(ro+rd*t);
+  res=min(res,8.0*h/t); t+=clamp(h,0.005,0.1); if(h<0.0005||t>3.0) break; } return clamp(res,0.0,1.0); }
+void main(){ vec2 p=(gl_FragCoord.xy*2.0-iRes)/iRes.y; float a=iTime*0.25;
+  vec3 ro=vec3(2.6*sin(a),0.6*sin(a*0.7),2.6*cos(a)); vec3 fw=normalize(-ro), rt=normalize(cross(vec3(0,1,0),fw)), up=cross(fw,rt);
+  vec3 rd=normalize(p.x*rt+p.y*up+1.8*fw); float t=0.0, trap=0.0; bool hit=false;
+  for(int i=0;i<400;i++){ if(i>=ITER) break; float d=bulb(ro+rd*t,trap); if(d<0.0004*t){hit=true;break;} t+=d; if(t>6.0) break; }
+  vec3 col=mix(vec3(0.02,0.03,0.06),vec3(0.08,0.05,0.15),gl_FragCoord.y/iRes.y);
+  if(hit){ vec3 pos=ro+rd*t, n=nrm(pos), l=normalize(vec3(0.6,0.8,-0.4));
+    float dif=max(dot(n,l),0.0)*shadow(pos+n*0.002,l); vec3 base=0.5+0.5*cos(vec3(0.0,0.6,1.0)+trap*2.0+iTime*0.3);
+    float spec=pow(max(dot(reflect(rd,n),l),0.0),32.0); col=base*(0.15+0.85*dif)+spec*0.6; }
+  frag=vec4(pow(col,vec3(0.4545)),1.0); }`;
+const VERT = `#version 300 es
+void main(){ vec2 p=vec2((gl_VertexID<<1)&2, gl_VertexID&2); gl_Position=vec4(p*2.0-1.0,0.0,1.0); }`;
+
+const cv = document.getElementById("c"), hud = document.getElementById("hud");
+const gl = cv.getContext("webgl2", { antialias: false, preserveDrawingBuffer: false, powerPreference: "high-performance" });
+let params = { mode: "bench", seconds: 30 };
+const api = () => (window.pywebview && window.pywebview.api) || null;
+
+function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+
+async function run() {
+  if (api()) try { params = await api().gpu_params(); } catch (e) { /* defaults */ }
+  if (!gl) { finish({ error: "WebGL2 not available" }); return; }
+  let prog;
+  try { prog = gl.createProgram(); gl.attachShader(prog, sh(gl.VERTEX_SHADER, VERT)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FRAG)); gl.linkProgram(prog); }
+  catch (e) { hud.textContent = "Shader error: " + e.message; finish({ error: e.message }); return; }
+  gl.useProgram(prog);
+  gl.bindVertexArray(gl.createVertexArray());
+  const uT = gl.getUniformLocation(prog, "iTime"), uR = gl.getUniformLocation(prog, "iRes"), uI = gl.getUniformLocation(prog, "ITER");
+  const px = new Uint8Array(4);
+  const iter = params.mode === "stress" ? 220 : 160;
+  const start = performance.now(), fpsS = [], fpsT = [];
+  let batch = 1;
+  const frame = () => {
+    const dpr = window.devicePixelRatio || 1, w = Math.round(cv.clientWidth * dpr), hgt = Math.round(cv.clientHeight * dpr);
+    if (cv.width !== w || cv.height !== hgt) { cv.width = w; cv.height = hgt; }
+    gl.viewport(0, 0, w, hgt);
+    const t0 = performance.now();
+    for (let i = 0; i < batch; i++) {
+      gl.uniform1f(uT, (performance.now() - start) / 1000); gl.uniform2f(uR, w, hgt); gl.uniform1i(uI, iter);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);   // waits for the GPU to finish
+    const dt = (performance.now() - t0) / 1000, fps = batch / dt;
+    batch = Math.max(1, Math.min(32, Math.round(batch * (0.014 / Math.max(dt, 1e-4)))));  // aim for ~14 ms per batch
+    const el = (performance.now() - start) / 1000;
+    if (el > 3) { fpsS.push(fps); fpsT.push([el, fps]); }
+    const avg = fpsS.length ? fpsS.reduce((a, b) => a + b, 0) / fpsS.length : fps;
+    hud.textContent = `${fps.toFixed(1)} FPS  (avg ${avg.toFixed(1)})` + (params.mode === "bench" ? `  ·  ${Math.max(0, params.seconds - el).toFixed(0)}s left` : "  ·  close window to stop");
+    if (params.mode === "bench" && el >= params.seconds) {
+      const s = fpsS.slice().sort((a, b) => a - b), a = s.reduce((x, y) => x + y, 0) / s.length;
+      const secs = []; let acc = 0, n = 0, t = 3;                      // per-second FPS for the results graph
+      for (const [tt, f] of fpsT) { if (tt >= t + 1) { secs.push([Math.round(t), n ? acc / n : 0]); acc = 0; n = 0; t = Math.floor(tt); } acc += f; n++; }
+      finish({ avg_fps: a, low_fps: s[Math.max(0, Math.floor(s.length * 0.01) - 1)] || s[0], low01_fps: s[Math.max(0, Math.floor(s.length * 0.001) - 1)] || s[0],
+        max_fps: secs.length ? Math.max(...secs.map(x => x[1])) : s[s.length - 1], fps_series: secs,
+        pixels: w * hgt, score: a * w * hgt / 2073600 * 100, resolution: `${w}x${hgt}` });
+      return;
+    }
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+function finish(res) { if (api()) api().gpu_result(res); else hud.textContent = JSON.stringify(res); }
+addEventListener("keydown", e => { if (e.key === "Escape") finish({ error: "Cancelled" }); });
+let started = false;
+const go = () => { if (!started) { started = true; run(); } };
+addEventListener("pywebviewready", go);
+addEventListener("load", () => setTimeout(go, 800));
+</script></body></html>

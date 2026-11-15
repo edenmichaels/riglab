@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>RigLab Overlay</title>
+<style>
+html,body{margin:0;background:transparent;overflow:hidden;font:600 13px "Cascadia Mono",Consolas,monospace;color:#e8ebf2}
+.box{display:inline-grid;grid-template-columns:auto auto auto auto;gap:3px 12px;padding:9px 13px;border-radius:10px;
+  background:rgba(8,10,15,.82);border:1px solid rgba(255,255,255,.08)}
+.k{color:#8b94a8;font-weight:500}
+</style></head>
+<body><div class="box" id="b">RigLab</div>
+<script>
+const col = t => t == null ? "#e8ebf2" : t >= 85 ? "#ff5c6c" : t >= 72 ? "#ffc046" : "#3ee08f";
+const v = (x, u) => x == null ? "—" : Math.round(x) + u;
+async function tick() {
+  try {
+    const s = (await pywebview.api.snapshot()).summary;
+    document.getElementById("b").innerHTML =
+      `<span class="k">CPU</span><span>${v(s.cpu_load, "%")}</span><span style="color:${col(s.cpu_temp)}">${v(s.cpu_temp, "°C")}</span><span>${v(s.cpu_power, "W")}</span>` +
+      `<span class="k">GPU</span><span>${v(s.gpu_load, "%")}</span><span style="color:${col(s.gpu_temp)}">${v(s.gpu_temp, "°C")}</span><span>${v(s.gpu_power, "W")}</span>` +
+      `<span class="k">RAM</span><span>${v(s.ram_load, "%")}</span><span></span><span></span>`;
+  } catch (e) {}
+  setTimeout(tick, 1000);
+}
+window.addEventListener("pywebviewready", tick);
+</script></body></html>

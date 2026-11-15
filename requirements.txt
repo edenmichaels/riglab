@@ -1,0 +1,10 @@
+pywebview>=5.0
+pystray>=0.19
+Pillow>=10.0
+psutil>=5.9
+numpy>=1.26
+pythonnet>=3.0.3
+nvidia-ml-py>=12.535
+openrgb-python>=0.3.0
+liquidctl>=1.13
+hidapi
