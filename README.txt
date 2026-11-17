@@ -1,12 +1,19 @@
-RigLab 3.6.1
+RigLab 3.7.0
 ============
+
+NEW IN 3.7.0
+  In-game overlay (Settings -> In-game overlay):
+  - Show FPS: FPS, 1% low and frame time for the game in front (off by default, fully offline)
+  - Styles: full stats, or an FPS counter (number only, + 1% low, + frame time, detailed, + graph)
+  - Move overlay: drag it anywhere on any screen (also in the tray menu); or snap to a corner
+  - Text size, FPS colour and background transparency (0% = text only)
 
 INSTALL (once)
   1. Right-click the zip -> Extract All.
   2. Open the extracted folder and double-click  "Build RigLab Installer.bat".
      The first build takes 5-10 minutes; later builds take 1-2.
      It sets up everything it needs by itself and keeps it in %LOCALAPPDATA%\RigLab-build.
-  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.6.1.exe.
+  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.7.0.exe.
      Double-click it: RigLab installs to Program Files with Start-menu and desktop shortcuts.
 
 UPDATE

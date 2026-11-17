@@ -74,6 +74,7 @@ const ICON_PATHS = {
   link: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7",
   logo: "M12 2l10 10-10 10L2 12z",
   home: "M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10",
+  move: "M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3",
   report: "M9 17v-6M13 17V7M17 17v-3M4 3h16v18H4z",
 };
 function icon(name, cls) {

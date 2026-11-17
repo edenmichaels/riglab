@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 
 import webview
 
@@ -12,6 +13,7 @@ from .core.config import APP_NAME, Config, app_dir, project_root
 from .core.fans import FanCurveEngine
 from .core.hw import SensorHub
 from .core.monitor import Alerts, CsvLogger
+from .core.overlay import guess_size as _ov_guess
 from .core.lighting import LightingEngine
 
 log = logging.getLogger(__name__)
@@ -45,6 +47,8 @@ class App:
         self.api = Api(self)
         self.window = None
         self.overlay = None
+        self._ov_size = None          # size the overlay page asked for
+        self._ov_edit = False         # move mode (clicks don't pass through)
         self.gpu_win = None
         self.gpu_params = {"mode": "bench", "seconds": 30}
         self.gpu_result = None
@@ -58,7 +62,8 @@ class App:
             background_color="#0a0c11", text_select=False, hidden=self.config["start_minimized"] or "--minimized" in sys.argv)
         self.window.events.closing += self._on_closing
         self.overlay = webview.create_window(
-            "RigLab Overlay", str(WEB / "overlay.html"), js_api=self.api, width=300, height=110,
+            "RigLab Overlay", str(WEB / "overlay.html"), js_api=self.api,
+            width=_ov_guess(self.config["overlay"])[0], height=_ov_guess(self.config["overlay"])[1],
             frameless=True, on_top=True, transparent=True, easy_drag=False, hidden=True, focus=False)
         self.overlay.events.shown += self._make_clickthrough
         self._start_tray()
@@ -143,6 +148,11 @@ class App:
             self.api._stress.stop("app closed")
         self.fans.release_all()     # fans back to BIOS / hub defaults
         try:
+            from .core import presentmon
+            presentmon.release_all()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             self.api._gpu.stop()
         except Exception:  # noqa: BLE001
             pass
@@ -175,6 +185,8 @@ class App:
             pystray.MenuItem("Open RigLab", lambda: self.show(), default=True),
             pystray.MenuItem("Overlay", lambda: self.toggle_overlay(),
                              checked=lambda _: self.config["overlay"]["enabled"]),
+            pystray.MenuItem("Move overlay", lambda: self.overlay_edit(not self._ov_edit),
+                             checked=lambda _: self._ov_edit),
             pystray.MenuItem("Quit", lambda: self.quit()))
         self.tray = pystray.Icon("RigLab", img, APP_NAME, menu)
         self.tray.run_detached()
@@ -187,22 +199,119 @@ class App:
                 pass
 
     # ------------------------------------------------------------------ overlay
+    def _screens(self) -> list[tuple[int, int, int, int]]:
+        out = []
+        for sc in getattr(webview, "screens", []) or []:
+            out.append((int(getattr(sc, "x", 0) or 0), int(getattr(sc, "y", 0) or 0), int(sc.width), int(sc.height)))
+        return out or [(0, 0, 1920, 1080)]
+
     def apply_overlay(self):
+        """Show/hide, size and place the overlay from the settings."""
+        from .core import overlay as ov
         if not self.overlay:
             return
         o = self.config["overlay"]
         if o["enabled"]:
             try:
-                scr = webview.screens[0]
-                w, h, m = 300, 110, 12
-                x = m if "left" in o["corner"] else scr.width - w - m
-                y = m if "top" in o["corner"] else scr.height - h - m - 48
+                w, h = self._ov_size or ov.guess_size(o)
+                self.overlay.resize(w, h)
+                x, y = ov.place(o, w, h, self._screens())
                 self.overlay.move(x, y)
             except Exception:  # noqa: BLE001
                 pass
             self.overlay.show()
         else:
+            self._ov_edit = False
             self.overlay.hide()
+        self._sync_overlay_fps()
+
+    def overlay_fit(self, w: int, h: int):
+        """The overlay page reports the size its content needs; resize, keeping it anchored to its corner/spot."""
+        from .core import overlay as ov
+        w, h = max(40, min(800, int(w))), max(24, min(600, int(h)))
+        if self._ov_size == (w, h) or not self.overlay:
+            return
+        self._ov_size = (w, h)
+        o = self.config["overlay"]
+        try:
+            self.overlay.resize(w, h)
+            if not self._ov_edit:
+                self.overlay.move(*ov.place(o, w, h, self._screens()))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def overlay_edit(self, on: bool) -> dict:
+        """Move mode: the overlay stops letting clicks through so it can be dragged; Done saves where it is."""
+        o = self.config["overlay"]
+        if on:
+            if not o["enabled"]:
+                o["enabled"] = True
+                self.config.save()
+                self.apply_overlay()
+            self._ov_edit = True
+            self._set_clickthrough(False)
+        else:
+            pos = self._overlay_pos()
+            self._ov_edit = False
+            self._set_clickthrough(True)
+            if pos:
+                from .core import overlay as ov
+                w, h = self._ov_size or ov.guess_size(o)
+                o["x"], o["y"] = ov.clamp_position(pos[0], pos[1], w, h, self._screens())
+                self.config.save()
+                self.overlay.move(o["x"], o["y"])
+        return {"edit": self._ov_edit, "x": o.get("x"), "y": o.get("y")}
+
+    def overlay_corner(self, corner: str):
+        """Snap back to a corner (forgets the dragged spot)."""
+        o = self.config["overlay"]
+        o["corner"], o["x"], o["y"] = corner, None, None
+        self.config.save()
+        self.apply_overlay()
+
+    def _overlay_hwnd(self):
+        if sys.platform != "win32":
+            return None
+        import ctypes
+        return ctypes.windll.user32.FindWindowW(None, "RigLab Overlay") or None
+
+    def _overlay_pos(self):
+        hwnd = self._overlay_hwnd()
+        if hwnd:
+            import ctypes
+            from ctypes import wintypes
+            r = wintypes.RECT()
+            if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                return r.left, r.top
+        try:
+            return int(self.overlay.x), int(self.overlay.y)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _sync_overlay_fps(self):
+        """PresentMon runs for the overlay only while the overlay is visible AND shows FPS in any style."""
+        from .core import overlay as ov
+        from .core import presentmon
+        if ov.needs_fps(self.config["overlay"]) and not self._quitting:
+            self._fps_retry_at = 0.0
+            threading.Thread(target=self.ensure_overlay_fps, name="OverlayFPS", daemon=True).start()
+        else:
+            presentmon.release("overlay")
+
+    def ensure_overlay_fps(self):
+        """(Re)join the shared capture for the overlay; retried at most every 30 s if PresentMon can't run."""
+        from .core import overlay as ov
+        from .core import presentmon
+        if not ov.needs_fps(self.config["overlay"]) or self._quitting:
+            return None
+        cap = presentmon.shared()
+        if cap and "overlay" in presentmon.holders():
+            return cap
+        if time.monotonic() < getattr(self, "_fps_retry_at", 0.0):
+            return None
+        self._fps_retry_at = time.monotonic() + 30
+        presentmon.release("overlay")                 # drop a dead capture before trying again
+        return presentmon.acquire("overlay")
 
     def toggle_overlay(self):
         self.config["overlay"]["enabled"] = not self.config["overlay"]["enabled"]
@@ -211,15 +320,17 @@ class App:
 
     def _make_clickthrough(self):
         """Let mouse clicks pass through the overlay to the game underneath."""
-        if sys.platform != "win32":
+        self._set_clickthrough(not self._ov_edit)
+
+    def _set_clickthrough(self, on: bool):
+        hwnd = self._overlay_hwnd()
+        if not hwnd:
             return
         import ctypes
         u = ctypes.windll.user32
-        hwnd = u.FindWindowW(None, "RigLab Overlay")
-        if hwnd:
-            GWL_EXSTYLE, LAYERED, TRANSPARENT, TOOLWINDOW, NOACTIVATE = -20, 0x80000, 0x20, 0x80, 0x08000000
-            style = u.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            u.SetWindowLongW(hwnd, GWL_EXSTYLE, style | LAYERED | TRANSPARENT | TOOLWINDOW | NOACTIVATE)
+        GWL_EXSTYLE, LAYERED, TRANSPARENT, TOOLWINDOW, NOACTIVATE = -20, 0x80000, 0x20, 0x80, 0x08000000
+        style = u.GetWindowLongW(hwnd, GWL_EXSTYLE) | LAYERED | TOOLWINDOW | NOACTIVATE
+        u.SetWindowLongW(hwnd, GWL_EXSTYLE, (style | TRANSPARENT) if on else (style & ~TRANSPARENT))
 
     def pick_file(self, label: str) -> str | None:
         kind = webview.FileDialog.OPEN if hasattr(webview, "FileDialog") else webview.OPEN_DIALOG
