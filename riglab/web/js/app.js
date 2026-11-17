@@ -16,16 +16,16 @@ const App = {
 const NAV = [
   ["home", "Home", "home", "Home"],
   ["label", "Monitor", null, "My PC"],
-  ["dashboard", "Dashboard", "dash", "How my PC is doing"],
+  ["dashboard", "Dashboard", "dash", "PC Health"],
   ["sensors", "Sensors", "pulse"],
   ["hardware", "Hardware", "chip"],
   ["crashes", "Crash Center", "alert", "Crashes & freezes"],
-  ["label", "Test", null, "Make it better"],
+  ["label", "Test", null, "Tools"],
   ["benchmark", "Benchmark", "bench"],
   ["stress", "Stress test", "flame"],
   ["label", "Control"],
   ["overclock", "Overclocking", "bolt"],
-  ["tweaks", "Tweaks", "sliders", "Speed-ups"],
+  ["tweaks", "Tweaks", "sliders", "Performance Tweaks"],
   ["cooling", "Cooling", "fan", "Fans"],
   ["lighting", "Lighting", "light", "Lights"],
   ["benchmark", null, "bench", "Speed test"],
@@ -40,11 +40,28 @@ function navItems() {
   return NAV.map(([id, adv, ic, easy]) => [id, simple ? easy : adv, ic]).filter(([, label]) => label);
 }
 
+/* Switches instantly (no restart): redraws the menu and the current page, keeping the same tab. Saved as ui.view. */
 async function setView(v) {
   App.view = v === "advanced" ? "advanced" : "simple";
-  try { await App.api.ui_set({ view: App.view }); } catch { /* preview */ }
   drawNav();
+  drawTopbar();
   if (App.pageId) go(App.pageId);
+  try { await App.api.ui_set({ view: App.view }); } catch { /* preview */ }
+}
+
+function drawTopbar() {
+  const box = $("#topbar");
+  if (!box) return;
+  const S = isSimple();
+  const b = (v, l, tip) => h("button" + ((v === "simple") === S ? ".on" : ""), { title: tip, "aria-pressed": (v === "simple") === S, onclick: () => { if ((v === "simple") !== S) setView(v); } }, l);
+  box.replaceChildren(
+    App.demo ? h("div.demo-tag", "Preview mode · simulated data") : null,
+    h("div.spacer"),
+    h("span.small.muted", { style: { marginRight: "4px" } }, "View:"),
+    h("div.seg.seg-sm", { role: "group", "aria-label": "Simple or Advanced view" },
+      b("simple", "Simple", "Plain words, traffic lights, risky settings hidden"),
+      b("advanced", "Advanced", "Every sensor, setting and technical detail")),
+    infoTip("Simple view uses plain words and hides risky settings. Advanced view shows every sensor, setting and technical detail. Nothing is removed in Simple view - switch any time."));
 }
 
 // ------------------------------------------------------------------ appearance
@@ -88,9 +105,9 @@ function buildShell() {
       h("div.row", h("span.k#ft-gpu-k", "GPU"), h("span.v#ft-gpu", "—")),
       h("div.row", h("span.k#ft-ram-k", "RAM"), h("span.v#ft-ram", "—"))));
   const main = h("main.main#main");
-  document.body.append(h("div.shell", side, main));
+  document.body.append(h("div.shell", side, h("div.content", h("header.topbar#topbar"), main)));
   drawNav();
-  if (App.demo) document.body.append(h("div.demo-tag", "Preview mode · simulated data"));
+  drawTopbar();
 }
 
 function go(id) {

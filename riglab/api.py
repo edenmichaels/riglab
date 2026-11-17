@@ -16,7 +16,7 @@ from dataclasses import asdict
 
 from datetime import datetime, timezone
 
-from .core import bench, crashes, diagnostics, explain, lhm_setup, oc, report, sysinfo, tweaks
+from .core import bench, crashes, diagnostics, explain, health, lhm_setup, oc, presets, report, sysinfo, tweaks
 from .core.changes import ChangeLog
 from .core.config import APP_VERSION, app_dir
 from .core.fans import PRESETS
@@ -52,6 +52,8 @@ class Api:
         self._dumps = crashes.DumpAnalyzer()
         self._crash_cache = None
         self._changes = ChangeLog()
+        self._health = health.HealthStore()
+        self._checking = threading.Lock()
         self.startup_notes_list = []
 
     # ------------------------------------------------------------------ general
@@ -865,6 +867,122 @@ class Api:
             self._log("junk", f"Freed {_size(b)} of temporary files", undo=False, detail=f"{n} files")
         return {"bytes": b, "files": n}
 
+    # ------------------------------------------------------------------ presets (Home)
+    def _preset_current(self):
+        tw = {}
+        for t in self._tweaks.values():
+            try:
+                tw[t.id] = t.get()
+            except Exception:  # noqa: BLE001
+                tw[t.id] = None
+        st = self.fans_state()
+        return {"plans": tweaks.power_plans(), "tweaks": tw,
+                "fans": {"controls": [{"id": c["id"], "name": c["name"], "curve": c["curve"], "pump": c["pump"]} for c in st["controls"]],
+                         "enabled": st["enabled"], "presets": st["presets"], "source": (st["temps"][0]["id"] if st["temps"] else None)}}
+
+    def preset_state(self):
+        last = self._cfg.data.get("ui", {}).get("preset")
+        try:
+            act = presets.active(self._preset_current(), last)
+        except Exception:  # noqa: BLE001
+            log.exception("preset state")
+            act = None
+        return {"cards": presets.cards(), "active": act, "last": last}
+
+    def preset_preview(self, pid):
+        try:
+            return presets.preview(pid, self._preset_current())
+        except KeyError:
+            return {"error": "Unknown preset"}
+
+    def preset_apply(self, pid):
+        """Apply a preset the person has just previewed. Logged as ONE change, so one Undo puts it all back."""
+        cur = self._preset_current()
+        try:
+            p = presets.preview(pid, cur)
+        except KeyError:
+            return {"ok": False, "msg": "Unknown preset"}
+        if p["nothing"]:
+            self._cfg.data.setdefault("ui", {})["preset"] = pid
+            self._cfg.save()
+            return {"ok": True, "msg": f"Your PC is already set up for {p['name']}", "changed": 0}
+        fans = cur["fans"]
+        before = {"plan": next((x["guid"] for x in cur["plans"] if x["active"]), None), "tweaks": {},
+                  "fans": {c["id"]: _copy(c["curve"]) for c in fans["controls"]}, "fans_enabled": fans["enabled"]}
+        done, failed = [], []
+        for c in p["changes"]:
+            try:
+                if c["kind"] == "plan":
+                    if not tweaks.set_power_plan(c["to"]):
+                        raise RuntimeError("Windows didn't accept the power plan")
+                elif c["kind"] == "tweak":
+                    before["tweaks"][c["key"]] = cur["tweaks"].get(c["key"])
+                    self._tweaks[c["key"]].set(bool(c["to"]))
+                elif c["kind"] == "fans":
+                    pts = [list(x) for x in fans["presets"][c["to"]]]
+                    for ctl in fans["controls"]:                       # new curves go on before anything is released
+                        pump = bool(ctl["pump"] or (ctl["curve"] or {}).get("pump"))
+                        self._fans.set_curve(ctl["id"], fans["source"], pts, pump)
+                    self._fans.enabled = True
+                done.append(c["text"])
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{c['text']} ({e})")
+        self._cfg.data.setdefault("ui", {})["preset"] = pid
+        self._cfg.save()
+        ok = bool(done)
+        self._log("preset", f"Applied the {p['name']} preset", before=before, after={"preset": pid}, undo=ok, ok=ok,
+                  risk=p["risk"], detail=" ".join(done + ["Didn't work: " + f for f in failed]))
+        if failed:
+            return {"ok": ok, "changed": len(done), "msg": f"{p['name']} applied, but {len(failed)} change{'s' if len(failed) > 1 else ''} didn't work: " + "; ".join(failed)}
+        return {"ok": True, "changed": len(done), "msg": f"{p['name']} preset applied. You can undo it in Change history."}
+
+    def _undo_preset(self, b):
+        if b.get("plan"):
+            tweaks.set_power_plan(b["plan"])
+        for tid, on in (b.get("tweaks") or {}).items():
+            if on is not None and tid in self._tweaks:
+                self._tweaks[tid].set(bool(on))
+        for cid, curve in (b.get("fans") or {}).items():
+            if curve:
+                self._fans.set_curve(cid, curve.get("source"), curve.get("points"), bool(curve.get("pump")))
+        for cid, curve in (b.get("fans") or {}).items():          # release only after the others are back in place
+            if not curve and cid in self._fans.curves:
+                self._fans.remove_curve(cid)
+        if b.get("fans_enabled") is False:
+            self._fans.release_all()
+
+    # ------------------------------------------------------------------ PC health (dial)
+    def health_last(self):
+        return {"last": self._health.last, "history": self._health.history[-60:]}
+
+    def health_quick(self):
+        """Quick check: live readings + drive health + crashes in the last 30 days. Takes 5-30 s; pywebview runs it
+        on its own thread, so the window never freezes."""
+        if not self._checking.acquire(blocking=False):
+            return {"busy": True}
+        try:
+            snap = self.snapshot()["summary"]
+            extra = self.pc_status()
+            fans = [x for x in self._hub.latest.sensors.values() if x.kind == "Fan" and x.value is not None
+                    and not (x.hw_type or "").startswith("Gpu")]
+            try:
+                crash = explain.serious_crashes(self.crashes_scan(30).get("incidents"))
+            except Exception:  # noqa: BLE001
+                log.exception("health: crashes")
+                crash = None
+            try:
+                drives = [d.get("Verdict") for d in sysinfo.drive_health()]
+            except Exception:  # noqa: BLE001
+                drives = []
+            readings = {"cpu_temp": snap.get("cpu_temp"), "gpu_temp": snap.get("gpu_temp"), "ram_load": snap.get("ram_load"),
+                        "disk_free_pct": extra.get("disk_free_pct"), "disk_free": extra.get("disk_free"),
+                        "fans": "none" if not fans else "good" if any(f.value > 0 for f in fans) else "warn",
+                        "crashes": crash, "drives": drives}
+            res = health.result(health.quick_items(readings, explain.lights(self._cfg.data.get("alerts"))))
+            return self._health.add(res)
+        finally:
+            self._checking.release()
+
     # ------------------------------------------------------------------ change history
     def _log(self, kind, title, before=None, after=None, undo=True, source="you", risk="Low", detail="", ok=True):
         try:
@@ -911,6 +1029,8 @@ class Api:
             elif k == "gpu_tune":
                 if not self._gpu.reset():
                     raise RuntimeError("The graphics card didn't accept the reset")
+            elif k == "preset":
+                self._undo_preset(b)
             elif k == "oc_windows":
                 if not oc.set_cpu_windows(b.get("boost_mode"), b.get("max_state")):
                     raise RuntimeError("Windows didn't accept the change (needs admin)")

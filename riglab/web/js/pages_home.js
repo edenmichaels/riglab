@@ -1,4 +1,4 @@
-/* Home: a start screen with a live summary of the PC, a tile for every tool and recent activity. */
+/* Home: the health dial in the centre, whole-PC presets underneath, then a tile for every tool. */
 "use strict";
 
 const HOME_TOOLS = [
@@ -19,8 +19,8 @@ const HOME_TOOLS = [
 
 // Simple view: plain names and descriptions; only pages listed in the Simple menu.
 const HOME_SIMPLE = [
-  ["dashboard", "How my PC is doing", "heart", "Green, yellow or red for temperatures, memory, space, fans and crashes."],
-  ["tweaks", "Speed-ups", "rocket", "Make games smoother, choose what opens with Windows and free up space."],
+  ["dashboard", "PC Health", "heart", "Green, yellow or red for temperatures, memory, space, fans, drives and crashes."],
+  ["tweaks", "Performance Tweaks", "rocket", "Make games smoother, choose which apps start with Windows, and free up space."],
   ["cooling", "Fans", "fan", "Make your PC quieter or cooler with one click."],
   ["lighting", "Lights", "light", "Pick a colour or effect for every light in your PC."],
   ["crashes", "Crashes & freezes", "alert", "Find out why your PC crashed or restarted by itself."],
@@ -29,62 +29,27 @@ const HOME_SIMPLE = [
 ];
 
 App.pages.home = {
-  async render(el) {
+  render(el) {
     this.el = el;
-    if (isSimple()) return this.renderSimple(el);
+    const S = isSimple();
     const hr = new Date().getHours();
     const greet = hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
-    this.gauges = h("div.home-gauges");
     this.status = {};
-    this.hero = h("div.home-hero",
-      h("div", { style: { minWidth: 0 } }, h("div.small.muted", greet), h("h1.home-title#home-title", "Your PC"),
-        h("div.muted#home-sub", "Reading your hardware…"),
-        h("div.row.wrap.mt", { style: { gap: "10px" } },
-          h("button.btn.primary", { onclick: () => go("dashboard") }, icon("dash"), "Open dashboard"),
-          h("button.btn", { onclick: () => this.open("gputune") }, icon("sliders"), "Tune the GPU"),
-          h("button.btn.ghost", { onclick: () => go("health") }, icon("heart"), "RigLab setup"))),
-      this.gauges);
-    this.tiles = h("div.home-tiles", HOME_TOOLS.map(([id, label, ic, desc, page]) => {
+    this.side = h("div.stack", { style: { gap: "16px" } });
+    el.append(h("div.card.home-center", h("div.small.muted", greet), healthDial({ link: true }), colourKey()));
+    el.append(h("div.mt", h("div.row", { style: { alignItems: "baseline", gap: "12px", padding: "8px 2px 10px" } },
+      h("h2.home-h2", "Presets"), h("span.small.muted", "Set up your whole PC for what you're doing. You'll see what changes before anything happens.")),
+      presetCards(() => this.load()),
+      h("div.small.muted", { style: { marginTop: "8px" } }, h("span.tl.good", { style: { marginRight: "6px", verticalAlign: "middle" } }),
+        "A green outline shows the preset you're using now.")));
+    const list = S ? HOME_SIMPLE : HOME_TOOLS;
+    this.tiles = h("div.home-tiles", list.map(([id, label, ic, desc, page]) => {
       const st = h("div.home-tile-status"); this.status[id] = st;
       return h("div.home-tile", { role: "button", tabIndex: 0, onclick: () => this.open(id, page), onkeydown: (e) => { if (e.key === "Enter") this.open(id, page); } },
-        h("div.icon-badge", icon(ic)), h("div", { style: { minWidth: 0 } }, h("b", label), h("div.small.muted", desc), st));
+        h("div.icon-badge", icon(ic)), h("div", { style: { minWidth: 0 } }, h("b", label), h("div.small.muted", desc), S ? null : st));
     }));
-    this.side = h("div.stack", { style: { gap: "16px" } });
-    el.append(this.hero, h("div.home-grid", h("div", h("div.nav-label", { style: { padding: "4px 2px 10px" } }, "Tools"), this.tiles), this.side));
-    this.tick(App.snap);
+    el.append(h("div.home-grid.mt", h("div", h("div.nav-label", { style: { padding: "12px 2px 10px" } }, S ? "What do you want to do?" : "Tools"), this.tiles), this.side));
     this.load();
-  },
-  renderSimple(el) {
-    const hr = new Date().getHours();
-    const greet = hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
-    this.gauges = null;
-    this.status = {};
-    this.ovDot = h("span"); this.ovSay = h("span", "Reading your PC…");
-    this.lightsBox = h("div");
-    this.hero = h("div.home-hero",
-      h("div", { style: { minWidth: 0 } }, h("div.small.muted", greet), h("h1.home-title", "Your PC"),
-        h("div.row", { style: { gap: "10px", fontSize: "17px", fontWeight: 600 } }, this.ovDot, this.ovSay),
-        h("div.row.wrap.mt", { style: { gap: "10px" } },
-          h("button.btn.primary", { onclick: () => go("dashboard") }, icon("heart"), "See how my PC is doing"),
-          actionBtn("tweaks.recommended", async () => { const r = await App.api.tweaks_recommended(); toast(r.msg, !r.ok); this.load(); }, { icon: "rocket" }))),
-      h("div.card", { style: { minWidth: "300px" } }, this.lightsBox));
-    this.tiles = h("div.home-tiles", HOME_SIMPLE.map(([id, label, ic, desc]) =>
-      h("div.home-tile", { role: "button", tabIndex: 0, onclick: () => go(id), onkeydown: (e) => { if (e.key === "Enter") go(id); } },
-        h("div.icon-badge", icon(ic)), h("div", { style: { minWidth: 0 } }, h("b", label), h("div.small.muted", desc)))));
-    this.side = h("div.stack", { style: { gap: "16px" } });
-    el.append(this.hero, h("div.home-grid", h("div", h("div.nav-label", { style: { padding: "4px 2px 10px" } }, "What do you want to do?"), this.tiles), this.side));
-    PcLights.load().then(() => this.tick(App.snap));
-    this.tick(App.snap);
-    this.load();
-  },
-  async loadSimple() {
-    let ch = [];
-    try { ch = (await App.api.changes_list()).slice(0, 5); } catch { /* none */ }
-    if (!document.body.contains(this.el)) return;
-    const when = (t) => new Date(t * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
-    this.side.replaceChildren(h("div.card", cardHead("Recent changes", "undo", h("button.btn.sm.ghost", { onclick: () => go("history") }, "See all")),
-      ch.length ? h("div.stack", { style: { gap: "8px" } }, ch.map(c => h("div.small", h("span.muted", when(c.time) + "  "), c.title)))
-        : h("div.small.muted", "Nothing changed yet. Everything RigLab changes shows up here, with an Undo button.")));
   },
   open(id, page) {
     if (page === "overclock") { App.pages.overclock.tab = id; go("overclock"); return; }
@@ -93,14 +58,8 @@ App.pages.home = {
   async load() {
     if (isSimple()) return this.loadSimple();
     const A = App.api, safe = (p) => p.then(v => v, () => null);
-    const [inv, light, oc, runs, diag] = await Promise.all([safe(A.inventory()), safe(A.light_state()), safe(A.oc_state()), safe(A.gpu_runs()), safe(A.diagnostics())]);
+    const [light, oc, runs, diag] = await Promise.all([safe(A.light_state()), safe(A.oc_state()), safe(A.gpu_runs()), safe(A.diagnostics())]);
     if (!document.body.contains(this.el)) return;
-    // --- headline: CPU + GPU names
-    const prof = oc?.profile || {};
-    const cpu = prof.cpu?.name, gpu = prof.gpu?.name, ram = prof.ram;
-    $("#home-title", this.el).textContent = gpu ? gpu.replace(/^(NVIDIA|AMD)\s+/, "") : "Your PC";
-    $("#home-sub", this.el).textContent = [cpu, ram?.total ? `${ram.total} ${ram.type || ""} @ ${ram.running || "?"} MT/s` : null].filter(Boolean).join("  ·  ") || "";
-    // --- tile status lines
     const set = (id, txt, cls = "") => { const s = this.status[id]; if (s) { s.textContent = txt; s.className = "home-tile-status " + cls; } };
     if (light) set("lighting", light.status === "running" ? `● ${light.stats?.leds || 0} LEDs · ${light.devices?.length || 0} devices · ${light.state?.effect || ""}` : `○ ${light.status}`, light.status === "running" ? "good" : "warn");
     if (oc) {
@@ -112,7 +71,6 @@ App.pages.home = {
     if (runs && runs.length) { const r = runs[runs.length - 1]; set("gputune", `Last run: ${r.label} · ${r.stats.fps_avg ? r.stats.fps_avg + " FPS" : (r.stats.score ? "score " + r.stats.score : "")} · ${r.time}`); }
     else set("gputune", "No benchmark runs yet");
     if (diag) { const bad = diag.filter(i => i.ok === false).length; set("health", bad ? `${bad} thing${bad > 1 ? "s" : ""} need attention` : "● Everything working", bad ? "bad" : "good"); }
-    // --- side column: latest GPU result + recent activity
     const cards = [];
     if (runs && runs.length) {
       const r = runs[runs.length - 1], s = r.stats;
@@ -125,25 +83,19 @@ App.pages.home = {
     cards.push(h("div.card", cardHead("Recent activity", "clock"),
       jr.length ? h("div.stack", { style: { gap: "8px" } }, jr.map(j => h("div.small", h("span.muted", new Date(j.time * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) + "  "), j.text)))
         : h("div.small.muted", "Tuning changes and test results show up here.")));
+    cards.push(await this.recentChanges());
     this.side.replaceChildren(...cards);
   },
-  tick(snap) {
-    if (snap && this.lightsBox && !this.gauges && document.body.contains(this.lightsBox)) {
-      PcLights.load();
-      const rows = PcLights.rows(snap);
-      this.lightsBox.replaceChildren(...rows.map(([k, v, o]) => lightRow(k, v, o || {})));
-      const o = PcLights.overall(snap);
-      this.ovDot.replaceChildren(dot(o.state)); this.ovSay.textContent = o.say;
-      return;
-    }
-    if (!snap || !this.gauges) return;
-    const s = snap.summary;
-    const g = (label, v, unit, max, colorFn) => h("div.home-gauge", h("div.small.muted", label),
-      h("div.stat-big", { style: { color: colorFn ? colorFn(v) : "" } }, v == null ? "—" : Math.round(v), h("small", " " + unit)),
-      h("div.bar", h("i", { style: { width: `${v == null ? 0 : Math.min(100, v / max * 100)}%` } })));
-    this.gauges.replaceChildren(
-      g("CPU temp", s.cpu_temp, "°C", 100, tempColor), g("CPU load", s.cpu_load, "%", 100),
-      g("GPU temp", s.gpu_temp, "°C", 100, tempColor), g("GPU load", s.gpu_load, "%", 100),
-      g("RAM", s.ram_load, "%", 100), g("GPU power", s.gpu_power, "W", 400));
+  async loadSimple() {
+    const card = await this.recentChanges();
+    if (document.body.contains(this.el)) this.side.replaceChildren(card);
+  },
+  async recentChanges() {
+    let ch = [];
+    try { ch = (await App.api.changes_list()).slice(0, 5); } catch { /* none */ }
+    const when = (t) => new Date(t * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+    return h("div.card", cardHead("Recent changes", "undo", h("button.btn.sm.ghost", { onclick: () => go("history") }, "See all")),
+      ch.length ? h("div.stack", { style: { gap: "8px" } }, ch.map(c => h("div.small", h("span.muted", when(c.time) + "  "), c.title)))
+        : h("div.small.muted", "Nothing has changed yet. Everything RigLab changes shows up here, with an Undo button."));
   },
 };

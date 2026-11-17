@@ -31,18 +31,48 @@ const PcLights = {
   },
 };
 
+/* The report card under the dial: one line per check from the last quick check, with a button where there's a fix. */
+function healthReport() {
+  const box = h("div");
+  let mounted = false;
+  const draw = () => {
+    if (mounted && !box.isConnected) { Health.subs.delete(draw); return; }
+    if (box.isConnected) mounted = true;
+    const r = Health.last;
+    if (Health.running) { box.replaceChildren(h("div.empty", h("div.spinner"), h("div.mt", "Checking your PC…"))); return; }
+    if (!r || !r.items) { box.replaceChildren(h("div.empty.small", "No report yet. Press “Run a quick check” to get one.")); return; }
+    const order = { bad: 0, warn: 1, good: 2, none: 3 };
+    const items = [...r.items].sort((a, b) => order[a.state] - order[b.state]);
+    box.replaceChildren(...items.map(i => h("div.report-item", dot(i.state, (XD.legend || {})[i.state]),
+      h("div", { style: { minWidth: 0 } }, h("div.tl-name", i.title), h("div.small.muted", i.say)),
+      i.page && i.fix ? h("button.btn.sm" + (i.state === "bad" ? ".primary" : ""), { onclick: () => go(i.page) }, i.fix) : null)),
+      h("div.small.muted", { style: { paddingTop: "10px" } }, `Quick check · ${new Date(r.time * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}. ` +
+        "The full check (virus scan, Windows file check and more) is coming in a later update."));
+  };
+  Health.subs.add(draw);
+  draw();
+  return box;
+}
+
+function healthTop() {
+  return h("div.grid", { style: { gridTemplateColumns: "minmax(280px, 380px) minmax(0, 1fr)", alignItems: "start" } },
+    h("div.card", { style: { paddingTop: "24px" } }, healthDial(), h("div.mt", colourKey())),
+    h("div.card", cardHead(isSimple() ? "Report card" : "Health report (quick check)", "report"), healthReport()));
+}
+
 App.pages.dashboard = {
   render(el) {
     this.el = el;
     if (isSimple()) {
-      el.append(pageHead("How my PC is doing", "Green means good, yellow is worth a look, red needs fixing."));
+      el.append(pageHead("PC Health", "Your PC's health score, what was checked, and live readings. Green is good, yellow is worth checking, red needs fixing."));
       this.alerts = h("div");
       el.append(this.alerts);
       this.showAlerts();
+      el.append(healthTop());
       this.lightsBox = h("div");
       this.overall = h("div.row", { style: { gap: "12px" } });
-      el.append(h("div.card", cardHead("Right now", "heart", this.overall), this.lightsBox,
-        h("div.tl-legend.mt", h("span", dot("good"), "Good"), h("span", dot("warn"), "Worth a look"), h("span", dot("bad"), "Needs fixing"))));
+      el.append(h("div.card.mt", cardHead("Right now", "pulse", this.overall), h("div.small.muted", "These readings update every second."), this.lightsBox,
+        h("div.mt", colourKey())));
       el.append(h("div.card.mt", cardHead("Things you can do", "rocket"), h("div.row.wrap", { style: { gap: "10px" } },
         actionBtn("tweaks.recommended", async () => { const r = await App.api.tweaks_recommended(); toast(r.msg, !r.ok); }, { cls: "primary", icon: "rocket" }),
         h("button.btn", { onclick: () => go("tweaks") }, icon("trash"), "Free up space"),
@@ -60,6 +90,7 @@ App.pages.dashboard = {
     this.alerts = h("div");
     el.append(this.alerts);
     this.showAlerts();
+    el.append(details("PC health score and report", healthTop()));
     this.renderFull(el, true);
   },
   renderFull(el, actions) {

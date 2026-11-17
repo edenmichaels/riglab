@@ -47,7 +47,7 @@ App.pages.cooling = {
     this.simpleBox.replaceChildren(
       h("div.card", cardHead("How should my fans behave?", "fan", infoBtn("fans.preset")),
         h("div.sub", cur ? `Your fans are set to ${cur[1]}.` : st.enabled ? "Your fans use your own settings. Pick one below to change them all." : "Your fans are controlled by your motherboard right now. Pick one below to let RigLab look after them."), goals),
-      h("div.card.mt", cardHead("Your fans", "fan"), fanRows,
+      h("div.card.mt", cardHead("Your fans", "fan"), fanRows, h("div", { style: { padding: "6px 0" } }, colourKey()),
         switchRow("fans.enable", st.enabled, async (v) => { await App.api.fans_enable(v); toast(v ? "RigLab is looking after your fans" : "Fans handed back to your motherboard"); this.refresh(); return true; })));
   },
   async refresh(first) {
