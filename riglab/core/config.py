@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "RigLab"
-APP_VERSION = "3.9.0"
+APP_VERSION = "3.10.0"
 
 
 def app_dir() -> Path:
@@ -54,9 +54,14 @@ DEFAULTS: dict = {
     "fan_curves": {},          # control_id -> {"source": sensor_id, "points": [[temp, pct], ...]}
     "rgb_profiles": {},        # name -> {device_name: "#rrggbb"}
     "overlay": {"enabled": False, "sensors": [], "corner": "top-left", "opacity": 0.85, "show_fps": False,
-                "mode": "full", "size": "m", "fps_color": "auto", "x": None, "y": None},
+                "mode": "full", "size": "m", "fps_color": "auto", "x": None, "y": None,
+                # 3.10: stats=None means "not chosen yet" so older settings can be migrated (core/overlay.migrate)
+                "stats": None, "layout": "horizontal", "text_color": "theme", "locked": True, "minimised": False,
+                "snap": False, "hotkey": ""},
     "ui": {"theme": "dark", "accent": "cyan", "start_page": "home", "view": "simple",    # view: simple | advanced
-           "preset": None},                                                          # last preset applied on Home
+           "preset": None,                                                           # last preset applied on Home
+           "text_scale": 1, "tour_done": False, "tips_hidden": []},
+    "health": {"weekly": False},                                                # weekly quick check (Task Scheduler), off by default
 }
 
 

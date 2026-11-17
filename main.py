@@ -3,6 +3,7 @@
 Installed RigLab is RigLab.exe (built by "Build RigLab Installer.bat"). Options:
   --minimized   start in the tray (used by "Start with Windows")
   --debug       open the browser dev tools
+  --weekly-check  run a quick health check and show the score (used by the optional weekly task)
 """
 from __future__ import annotations
 
@@ -52,6 +53,9 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("RigLab.App")  # own taskbar icon
 
     from riglab.core import instance
+    if "--weekly-check" in sys.argv and instance.ask("check"):
+        logging.info("weekly check handed to the running RigLab")
+        return
     logging.info("startup: %s", instance.take_over())
 
     from riglab.app import App

@@ -31,7 +31,7 @@ App.pages.crashes = {
       h("div.stat-big", { style: { marginTop: "8px", color: n ? col : css("--good") } }, n));
     const stab = h("canvas.chart", { style: { height: "120px" } });
     const parts = [
-      h("div.grid", { style: { gridTemplateColumns: "repeat(5,1fr)" } },
+      h("div.grid", { style: { gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" } },
         tile("Blue screens", count(["bsod"]), css("--bad"), "alert"), tile("Unexpected restarts", count(["reset"]), css("--bad"), "power"),
         tile("Graphics resets", count(["gpu", "livekernel"]), css("--warn"), "gpu"), tile("Hardware errors", count(["whea"]), css("--warn"), "cpu"),
         tile("App crashes", count(["app"]), css("--muted"), "x")),

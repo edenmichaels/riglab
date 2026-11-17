@@ -16,7 +16,7 @@ from dataclasses import asdict
 
 from datetime import datetime, timezone
 
-from .core import bench, crashes, diagnostics, explain, health, lhm_setup, oc, presets, report, sysinfo, tweaks
+from .core import bench, crashes, diagnostics, explain, health, healthcheck, lhm_setup, oc, pcinfo, presets, report, schedule, storage, sysinfo, tweaks
 from .core.changes import ChangeLog
 from .core.config import APP_VERSION, app_dir
 from .core.fans import PRESETS
@@ -53,7 +53,8 @@ class Api:
         self._crash_cache = None
         self._changes = ChangeLog()
         self._health = health.HealthStore()
-        self._checking = threading.Lock()
+        self._job = None
+        self._big = None              # largest-files scan
         self.startup_notes_list = []
 
     # ------------------------------------------------------------------ general
@@ -64,8 +65,7 @@ class Api:
 
     def ui_set(self, values):
         """Appearance + start page (saved immediately, no Save button needed)."""
-        self._cfg.data.setdefault("ui", {}).update({k: v for k, v in values.items() if k in ("theme", "accent", "start_page")
-                                                     or (k == "view" and v in ("simple", "advanced"))})
+        self._cfg.data.setdefault("ui", {}).update(ui_values(values))
         self._cfg.save()
         return self._cfg.data["ui"]
 
@@ -297,13 +297,60 @@ class Api:
         return True
 
     def overlay_config(self):
-        """What the overlay page should draw (re-read every tick, so Settings changes show up live)."""
+        """What the overlay page should draw (re-read every second, so Settings changes show up live)."""
         o = self._cfg["overlay"]
-        return {"mode": overlay.norm_mode(o.get("mode")), "show_fps": bool(o.get("show_fps")), "size": o.get("size", "m"),
-                "opacity": float(o.get("opacity", 0.85)), "fps_color": o.get("fps_color", "auto"), "edit": self._app._ov_edit}
+        ui = self._cfg.data.get("ui", {})
+        return {"stats": list(o.get("stats") or ["fps"]), "layout": o.get("layout", "horizontal"), "size": o.get("size", "m"),
+                "opacity": float(o.get("opacity", 0.85)), "text_color": o.get("text_color", "theme"), "fps_color": o.get("fps_color", "auto"),
+                "locked": bool(o.get("locked", True)), "minimised": bool(o.get("minimised")), "theme": ui.get("theme", "dark"),
+                "edit": not o.get("locked", True), "hotkey": overlay.hotkey_label(o.get("hotkey", ""))}
+
+    def overlay_data(self):
+        """Just the readings the overlay shows (much lighter than snapshot)."""
+        h = self._hub
+        val = lambda s: _r(s.value) if s is not None and s.value is not None else None  # noqa: E731
+        out = {"cpu_temp": val(h.cpu_temp()), "gpu_temp": val(h.gpu_temp()), "cpu_load": val(h.cpu_load()),
+               "gpu_load": val(h.gpu_load()), "ram": val(h.ram_load()), "cpu_clock": _r(h.cpu_clock(), 0)}
+        gc = next((s for s in h.latest.sensors.values() if s.kind == "Clock" and (s.hw_type or "").startswith("Gpu")
+                   and "core" in s.name.lower() and s.value is not None), None)
+        out["gpu_clock"] = _r(gc.value, 0) if gc else None
+        out["fps"] = self.overlay_fps()
+        return out
 
     def overlay_edit(self, on):
         return self._app.overlay_edit(bool(on))
+
+    def overlay_lock(self, locked):
+        return self._app.overlay_lock(bool(locked))
+
+    def overlay_minimise(self, on):
+        return self._app.overlay_minimise(bool(on))
+
+    def overlay_track(self):
+        return self._app.overlay_track()
+
+    def overlay_set(self, values):
+        """Overlay settings panel: applies straight away (no Save button). Position is only changed by dragging."""
+        o = self._cfg["overlay"]
+        new = dict(o)
+        for k, v in (values or {}).items():
+            if k in ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color"):
+                new[k] = v
+        if values.get("preset") in overlay.PRESETS:
+            new = overlay.apply_preset(new, values["preset"])
+        new = overlay.migrate(new)
+        hotkey_changed = new.get("hotkey") != o.get("hotkey")
+        if new.get("hotkey") and not overlay.parse_hotkey(new["hotkey"]):
+            new["hotkey"] = o.get("hotkey", "")
+        o.clear()
+        o.update(new)
+        self._cfg.save()
+        self._app._ov_size = None
+        self._app.apply_overlay()
+        ok = True
+        if hotkey_changed:
+            ok = bool(self._app.overlay_hotkey()) or not o.get("hotkey")
+        return {"overlay": o, "hotkey_ok": ok}
 
     def overlay_corner(self, corner):
         self._app.overlay_corner(corner)
@@ -763,8 +810,16 @@ class Api:
             except Exception as e:  # noqa: BLE001
                 gpu = {"error": str(e)}
         self._startup = tweaks.startup_items()
-        startup = [{"i": i, "name": s.name, "cmd": s.command, "where": s.location, "on": s.enabled}
-                   for i, s in enumerate(self._startup)]
+        startup = []
+        for i, it in enumerate(self._startup):
+            size = None
+            try:
+                p = storage.exe_path(it.command)
+                size = os.path.getsize(os.path.expandvars(p)) if p else None
+            except OSError:
+                pass
+            impact, why = storage.startup_impact(it.name, it.command, size)
+            startup.append({"i": i, "name": it.name, "cmd": it.command, "where": it.location, "on": it.enabled, "impact": impact, "why": why})
         return {"tweaks": out, "plans": plans, "gpu": gpu, "startup": startup, "admin": tweaks.is_admin()}
 
     def tweak_set(self, tid, on, source="you"):
@@ -955,33 +1010,208 @@ class Api:
     def health_last(self):
         return {"last": self._health.last, "history": self._health.history[-60:]}
 
-    def health_quick(self):
-        """Quick check: live readings + drive health + crashes in the last 30 days. Takes 5-30 s; pywebview runs it
-        on its own thread, so the window never freezes."""
-        if not self._checking.acquire(blocking=False):
-            return {"busy": True}
+    def _readings_items(self, ctx=None):
+        """Live readings + drive health + crashes in the last 30 days, as report-card items."""
+        snap = self.snapshot()["summary"]
+        extra = self.pc_status()
+        fans = [x for x in self._hub.latest.sensors.values() if x.kind == "Fan" and x.value is not None
+                and not (x.hw_type or "").startswith("Gpu")]
         try:
-            snap = self.snapshot()["summary"]
-            extra = self.pc_status()
-            fans = [x for x in self._hub.latest.sensors.values() if x.kind == "Fan" and x.value is not None
-                    and not (x.hw_type or "").startswith("Gpu")]
+            crash = explain.serious_crashes(self.crashes_scan(30).get("incidents"))
+        except Exception:  # noqa: BLE001
+            log.exception("health: crashes")
+            crash = None
+        try:
+            drives = [d.get("Verdict") for d in sysinfo.drive_health()]
+        except Exception:  # noqa: BLE001
+            drives = []
+        readings = {"cpu_temp": snap.get("cpu_temp"), "gpu_temp": snap.get("gpu_temp"), "ram_load": snap.get("ram_load"),
+                    "disk_free_pct": extra.get("disk_free_pct"), "disk_free": extra.get("disk_free"),
+                    "fans": "none" if not fans else "good" if any(f.value > 0 for f in fans) else "warn",
+                    "crashes": crash, "drives": drives}
+        return health.quick_items(readings, explain.lights(self._cfg.data.get("alerts")))
+
+    def health_start(self, kind="quick"):
+        """Start a quick or full check in the background. The screen polls health_status() for progress."""
+        j = self._job
+        if j and j.running():
+            return {"busy": True, **j.status()}
+        kind = "full" if kind == "full" else "quick"
+        used = None
+        try:
+            import shutil
+            used = shutil.disk_usage(os.environ.get("SYSTEMDRIVE", "C:") + "\\").used if sys.platform == "win32" else None
+        except OSError:
+            pass
+        online = healthcheck.is_online() if kind == "full" else True
+        self._job = healthcheck.CheckJob(kind, healthcheck.build_steps(kind, self._readings_items, used), online=online)
+        self._job.on_done = self._health.add
+        self._job.start()
+        return self._job.status()
+
+    def health_status(self):
+        j = self._job
+        return j.status() if j else {"running": False, "result": None, "items": []}
+
+    def health_cancel(self):
+        if self._job and self._job.running():
+            self._job.cancel()
+            return True
+        return False
+
+    def health_quick(self):
+        """Quick check without the progress screen (used by the weekly scheduled check). Waits for the result."""
+        if self._job and self._job.running():
+            return {"busy": True}
+        self._job = healthcheck.CheckJob("quick", healthcheck.build_steps("quick", self._readings_items), online=True)
+        self._job.on_done = self._health.add
+        self._job.start(background=False)
+        return self._job.result or {}
+
+    def health_fix(self, fix_id):
+        """A Fix it button on the report card. Risky ones were confirmed (and a restore point made) by the screen."""
+        f = healthcheck.FIXES.get(fix_id)
+        if not f:
+            return {"ok": False, "msg": "Unknown fix"}
+        if f.get("online") and not healthcheck.is_online():
+            return {"ok": False, "msg": "This repair needs an internet connection. Connect and try again."}
+        if not f.get("job"):
             try:
-                crash = explain.serious_crashes(self.crashes_scan(30).get("incidents"))
-            except Exception:  # noqa: BLE001
-                log.exception("health: crashes")
-                crash = None
-            try:
-                drives = [d.get("Verdict") for d in sysinfo.drive_health()]
-            except Exception:  # noqa: BLE001
-                drives = []
-            readings = {"cpu_temp": snap.get("cpu_temp"), "gpu_temp": snap.get("gpu_temp"), "ram_load": snap.get("ram_load"),
-                        "disk_free_pct": extra.get("disk_free_pct"), "disk_free": extra.get("disk_free"),
-                        "fans": "none" if not fans else "good" if any(f.value > 0 for f in fans) else "warn",
-                        "crashes": crash, "drives": drives}
-            res = health.result(health.quick_items(readings, explain.lights(self._cfg.data.get("alerts"))))
-            return self._health.add(res)
-        finally:
-            self._checking.release()
+                if f.get("open"):
+                    os.startfile(f["open"]) if sys.platform == "win32" else None
+                else:
+                    subprocess.Popen(f["cmd"], creationflags=0x08000000 if sys.platform == "win32" else 0)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "msg": f"Couldn't open it: {e}"}
+            if fix_id == "memtest":
+                self._log("fix", "Fix it: scheduled Windows' memory test", undo=False, source="fix", risk=f["risk"],
+                          detail="Windows Memory Diagnostic opened - choose when to restart.")
+            return {"ok": True, "msg": "Opened" if f.get("open") or fix_id.startswith("open_") else "Started"}
+        if self._job and self._job.running():
+            return {"ok": False, "msg": "Another check or repair is still running"}
+
+        def repair(ctx):
+            rc, out = ctx.run(f["cmd"], timeout=2 * 3600)
+            return [healthcheck.repair_item(fix_id, rc, out)]
+        self._job = healthcheck.CheckJob("repair", [healthcheck.Step(fix_id, f["label"], f["est"], repair)])
+
+        def done(_res):
+            it = self._job.items[0] if self._job.items else {}
+            self._log("fix", "Fix it: " + f["label"], undo=False, source="fix", risk=f["risk"], ok=it.get("state") == "good",
+                      detail=it.get("say", ""))
+        self._job.on_done = done
+        self._job.start()
+        return {"ok": True, "msg": "Started", **self._job.status()}
+
+    def health_history(self):
+        return self._health.history[-200:]
+
+    def health_save_text(self):
+        """Save the last report as a text file in Documents\\RigLab reports and show it."""
+        r = self._health.last
+        if not r:
+            return {"ok": False, "msg": "Run a check first"}
+        folder = os.path.join(os.path.expanduser("~"), "Documents", "RigLab reports")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, time.strftime("RigLab health report %Y-%m-%d %H%M.txt", time.localtime(r["time"])))
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(health.report_text(r, APP_VERSION))
+        except OSError as e:
+            return {"ok": False, "msg": f"Couldn't save the report: {e}"}
+        _open_path(path)
+        return {"ok": True, "msg": "Report saved: " + path, "path": path}
+
+    # ------------------------------------------------------------------ Explain my PC
+    def explain_pc(self):
+        inv = self.inventory()
+        return {"items": pcinfo.explain(inv.get("sections") or {})}
+
+    # ------------------------------------------------------------------ storage clean-up
+    def storage_state(self):
+        drives = []
+        try:
+            import psutil
+            for p in psutil.disk_partitions():
+                try:
+                    u = psutil.disk_usage(p.mountpoint)
+                    drives.append({"name": p.mountpoint, "total": u.total, "free": u.free, "pct_free": explain.free_pct(u.total, u.free)})
+                except OSError:
+                    continue
+        except ImportError:
+            pass
+        try:
+            ub, un = storage.folder_size(storage.update_cache_dir(), older_than_days=10) if sys.platform == "win32" else (0, 0)
+        except OSError:
+            ub, un = 0, 0
+        return {"drives": drives, "updates": {"bytes": ub, "files": un}, "big": self.storage_big_status()}
+
+    def storage_big_start(self):
+        if self._big and self._big.get("running"):
+            return self.storage_big_status()
+        roots = storage.user_roots()
+        job = {"running": True, "files": [], "finished": False, "roots": [str(r) for r in roots], "cancel": False, "started": time.time()}
+        self._big = job
+
+        def run():
+            files, done = storage.largest_files(roots, deadline=time.monotonic() + 120, cancelled=lambda: job["cancel"])
+            job.update(files=files, finished=done, running=False)
+        threading.Thread(target=run, name="LargestFiles", daemon=True).start()
+        return self.storage_big_status()
+
+    def storage_big_status(self):
+        j = self._big
+        if not j:
+            return {"running": False, "files": None}
+        return {"running": j["running"], "files": j["files"] if not j["running"] else None, "finished": j["finished"],
+                "roots": j["roots"], "elapsed": time.time() - j["started"]}
+
+    def storage_recycle(self, path):
+        """Move one of the listed big files to the Recycle Bin (only files inside your own folders)."""
+        roots = storage.user_roots()
+        if not storage.inside(path, roots) or not os.path.isfile(path):
+            return {"ok": False, "msg": "RigLab only removes files from your own folders"}
+        size = os.path.getsize(path)
+        if sys.platform != "win32":
+            return {"ok": False, "msg": "Windows only"}
+        script = ("Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
+                  "$env:RIGLAB_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')")
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "RIGLAB_PATH": path}, creationflags=0x08000000)
+        ok = r.returncode == 0 and not os.path.exists(path)
+        self._log("recycle", f"Moved {os.path.basename(path)} to the Recycle Bin ({_size(size)})", undo=False, ok=ok,
+                  detail="You can put it back from the Recycle Bin." if ok else (r.stderr or "")[:200])
+        if ok and self._big and self._big.get("files"):
+            self._big["files"] = [f for f in self._big["files"] if f["path"] != path]
+        return {"ok": ok, "msg": "Moved to the Recycle Bin. You can put it back from there." if ok else "Windows didn't move it (is it open in another app?)"}
+
+    def storage_show(self, path):
+        if sys.platform == "win32" and storage.inside(path, storage.user_roots()):
+            subprocess.Popen(["explorer", "/select,", path])
+            return True
+        return False
+
+    def storage_clean_updates(self):
+        if sys.platform != "win32":
+            return {"ok": False, "msg": "Windows only"}
+        b, n = storage.clean_folder(storage.update_cache_dir(), older_than_days=10)
+        self._log("update_cache", f"Removed {_size(b)} of old Windows update downloads", undo=False, detail=f"{n} files")
+        return {"ok": True, "bytes": b, "files": n, "msg": f"Freed {_size(b)}"}
+
+    # ------------------------------------------------------------------ weekly check
+    def weekly_state(self):
+        return {"on": bool(self._cfg.data.get("health", {}).get("weekly")), "scheduled": schedule.is_scheduled()}
+
+    def weekly_set(self, on, source="you"):
+        ok, msg = schedule.set_weekly(bool(on))
+        if ok:
+            was = bool(self._cfg.data.setdefault("health", {}).get("weekly"))
+            self._cfg.data["health"]["weekly"] = bool(on)
+            self._cfg.save()
+            self._log("weekly", "Weekly quick check " + ("on (Sundays at 7 pm)" if on else "off"), before={"on": was}, after={"on": bool(on)},
+                      source=source, detail=msg)
+        return {"ok": ok, "msg": ("Weekly check is on. It runs on Sundays at 7 pm." if on else "Weekly check is off.") if ok else
+                f"Task Scheduler didn't accept it: {msg}"}
 
     # ------------------------------------------------------------------ change history
     def _log(self, kind, title, before=None, after=None, undo=True, source="you", risk="Low", detail="", ok=True):
@@ -1029,6 +1259,12 @@ class Api:
             elif k == "gpu_tune":
                 if not self._gpu.reset():
                     raise RuntimeError("The graphics card didn't accept the reset")
+            elif k == "weekly":
+                ok, msg = schedule.set_weekly(bool(b["on"]))
+                if not ok:
+                    raise RuntimeError(msg)
+                self._cfg.data.setdefault("health", {})["weekly"] = bool(b["on"])
+                self._cfg.save()
             elif k == "preset":
                 self._undo_preset(b)
             elif k == "oc_windows":
@@ -1048,10 +1284,8 @@ class Api:
         return self._cfg.data
 
     def save_settings(self, data):
-        if isinstance(data.get("overlay"), dict):
-            data["overlay"] = {k: v for k, v in data["overlay"].items() if k not in ("x", "y")}   # moved only by dragging
-            self._app._ov_size = None                 # style/size may have changed: let the overlay re-measure
-        for k in ("alerts", "overlay", "logging", "openrgb", "liquidctl"):
+        # the overlay saves itself as you change it (overlay_set), so a stale copy here never overwrites it
+        for k in ("alerts", "logging", "openrgb", "liquidctl"):
             if k in data:
                 self._cfg[k].update(data[k])
         for k in ("minimize_to_tray", "poll_interval_ms", "start_minimized"):
@@ -1093,6 +1327,32 @@ def _size(b):
         if b < 1024 or u == "GB":
             return f"{b:.0f} {u}" if u == "bytes" else f"{b:.1f} {u}"
         b /= 1024
+
+
+THEME_IDS = ("dark", "light", "system", "dracula", "nord", "catppuccin", "gruvbox", "solarized", "tokyo", "onedark", "contrast")
+ACCENTS = ("theme", "cyan", "violet", "emerald", "amber", "crimson", "ocean", "mono")
+TEXT_SCALES = (0.8, 1, 1.25, 1.5)
+
+
+def ui_values(values: dict) -> dict:
+    """Only known appearance/tour keys with valid values get saved (anything else is ignored)."""
+    out = {}
+    for k, v in (values or {}).items():
+        if k == "theme" and v in THEME_IDS:
+            out[k] = v
+        elif k == "accent" and v in ACCENTS:
+            out[k] = v
+        elif k == "start_page" and isinstance(v, str) and len(v) < 40:
+            out[k] = v
+        elif k == "view" and v in ("simple", "advanced"):
+            out[k] = v
+        elif k == "text_scale" and isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = min(TEXT_SCALES, key=lambda x: abs(x - float(v)))
+        elif k == "tour_done" and isinstance(v, bool):
+            out[k] = v
+        elif k == "tips_hidden" and isinstance(v, list):
+            out[k] = [str(x)[:40] for x in v][:100]
+    return out
 
 
 def _num(s: str) -> str:

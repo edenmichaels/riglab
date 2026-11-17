@@ -12,17 +12,21 @@ const HOME_TOOLS = [
   ["sensors", "Sensors", "pulse", "Every sensor in the PC, with min/max and logging."],
   ["hardware", "Hardware", "chip", "Full specs of every component, drive health, report."],
   ["crashes", "Crash Center", "alert", "Why the PC crashed: Event Viewer, Reliability and dump files."],
-  ["tweaks", "Tweaks", "sliders", "Power plans, Windows gaming settings, startup apps."],
+  ["tweaks", "Tweaks", "sliders", "Power plans, Windows gaming settings, startup apps with impact ratings."],
+  ["storage", "Storage cleanup", "trash", "Largest files, temp files and old Windows update files."],
+  ["explain", "PC summary", "chip", "A plain-English summary of your hardware."],
   ["history", "Change history", "undo", "Everything RigLab changed, with one-click undo."],
   ["health", "RigLab setup", "heart", "Make sure every RigLab feature can do its job."],
 ];
 
 // Simple view: plain names and descriptions; only pages listed in the Simple menu.
 const HOME_SIMPLE = [
-  ["dashboard", "PC Health", "heart", "Green, yellow or red for temperatures, memory, space, fans, drives and crashes."],
+  ["dashboard", "PC Health", "heart", "Your health score, a full report card, and live readings."],
+  ["explain", "My PC explained", "chip", "What's inside your PC, in plain English."],
   ["tweaks", "Performance Tweaks", "rocket", "Make games smoother, choose which apps start with Windows, and free up space."],
   ["cooling", "Fans", "fan", "Make your PC quieter or cooler with one click."],
   ["lighting", "Lights", "light", "Pick a colour or effect for every light in your PC."],
+  ["storage", "Free up space", "trash", "Find big files, and clear out temporary and old update files."],
   ["crashes", "Crashes & freezes", "alert", "Find out why your PC crashed or restarted by itself."],
   ["benchmark", "Speed test", "bench", "See how fast your PC is, and whether a change helped."],
   ["history", "Change history", "undo", "Everything RigLab has changed, with an Undo button for each."],
@@ -36,7 +40,17 @@ App.pages.home = {
     const greet = hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
     this.status = {};
     this.side = h("div.stack", { style: { gap: "16px" } });
-    el.append(h("div.card.home-center", h("div.small.muted", greet), healthDial({ link: true }), colourKey()));
+    const goals = [
+      ["slow", "My PC is slow", "rocket", "Turn off apps that start with Windows", () => go("tweaks", { focus: "startup" })],
+      ["stutter", "My games stutter", "bench", "See what the Gaming preset would change", () => presetPanel("gaming", () => this.load())],
+      ["healthy", "Check if my PC is healthy", "heart", "Run a quick check", () => { go("dashboard"); Health.run("quick"); }],
+      ["space", "Clean up space", "trash", "Find what's filling your drive", () => go("storage")],
+    ];
+    el.append(h("div.home-top",
+      h("div.card.home-center", h("div.small.muted", greet), healthDial({ link: true }), colourKey()),
+      h("div.card.start-here", cardHead("Start here", "info"), h("div.small.muted", { style: { marginTop: "-6px" } }, "What would you like help with?"),
+        goals.map(([id, label, ic, sub, fn]) => h("button.goal", { "data-goal": id, onclick: fn },
+          h("div.icon-badge", icon(ic)), h("div", h("div", label), h("div.small.muted", { style: { fontWeight: 400 } }, sub)))))));
     el.append(h("div.mt", h("div.row", { style: { alignItems: "baseline", gap: "12px", padding: "8px 2px 10px" } },
       h("h2.home-h2", "Presets"), h("span.small.muted", "Set up your whole PC for what you're doing. You'll see what changes before anything happens.")),
       presetCards(() => this.load()),

@@ -2,6 +2,64 @@
    browser (no Python). Lets you click through and tweak the design without running RigLab. */
 "use strict";
 
+/* Overlay settings in preview mode, shared by the main window and overlay.html (same browser storage). */
+const DemoOverlay = {
+  KEY: "riglab.demo.overlay",
+  def: { enabled: true, stats: ["fps"], preset: "minimal", layout: "horizontal", size: "m", opacity: 0.85, text_color: "theme", fps_color: "auto",
+    locked: true, minimised: false, snap: false, corner: "top-left", x: null, y: null, hotkey: "" },
+  load() { try { return Object.assign({}, this.def, JSON.parse(localStorage.getItem(this.KEY) || "{}")); } catch { return Object.assign({}, this.def); } },
+  save(o) { try { localStorage.setItem(this.KEY, JSON.stringify(o)); } catch { /* ignore */ } return o; },
+  PRESETS: { minimal: ["fps"], standard: ["fps", "cpu_temp", "gpu_temp"], full: ["fps", "low1", "frametime", "cpu_temp", "gpu_temp", "cpu_load", "gpu_load", "ram", "cpu_clock", "gpu_clock"] },
+  presetOf(st) { for (const [k, v] of Object.entries(this.PRESETS)) if (JSON.stringify(v) === JSON.stringify(st)) return k; return "custom"; },
+  set(values) {
+    const o = this.load();
+    for (const k of ["enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color"]) if (k in values) o[k] = values[k];
+    if (this.PRESETS[values.preset]) { o.stats = this.PRESETS[values.preset].slice(); o.layout = values.preset === "full" ? "vertical" : "horizontal"; }
+    if (!o.stats || !o.stats.length) o.stats = ["fps"];
+    o.preset = this.presetOf(o.stats);
+    return this.save(o);
+  },
+  config() {
+    const o = this.load();
+    let theme = "dark"; try { theme = JSON.parse(localStorage.getItem("riglab.theme") || "{}").theme || "dark"; } catch { /* default */ }
+    return { stats: o.stats, layout: o.layout, size: o.size, opacity: o.opacity, text_color: o.text_color, fps_color: o.fps_color, locked: o.locked,
+      minimised: o.minimised, theme, edit: !o.locked, hotkey: o.hotkey };
+  },
+};
+
+/* Fake backend for overlay.html in preview mode: a pretend screen the size of the browser window. */
+class DemoOverlayApi {
+  constructor() { this.t0 = Date.now(); }
+  async overlay_config() { return DemoOverlay.config(); }
+  async overlay_data() {
+    const t = (Date.now() - this.t0) / 1000, w = (a, b, p) => a + b * Math.sin(t / p);
+    const fps = w(142, 18, 3.1);
+    return { cpu_temp: w(62, 6, 9), gpu_temp: w(58, 7, 11), cpu_load: w(38, 12, 5), gpu_load: w(91, 6, 4), ram: w(47, 2, 30), cpu_clock: w(4950, 120, 2), gpu_clock: w(2610, 60, 3),
+      fps: { state: "ok", fps, low1: fps * 0.72, frametime: 1000 / fps, app: "Game.exe" } };
+  }
+  async overlay_lock(on) { const o = DemoOverlay.load(); o.locked = !!on; DemoOverlay.save(o); return { locked: o.locked }; }
+  async overlay_minimise(on) { const o = DemoOverlay.load(); o.minimised = !!on; DemoOverlay.save(o); return { minimised: o.minimised }; }
+  async overlay_fit() { return true; }
+  async overlay_track() { return { state: null }; }
+  /* same rules as core/overlay.py: keep inside the screen; snap to the nearest corner if snapping is on */
+  demoPos(w, h, W, H) {
+    const o = DemoOverlay.load(), M = 12;
+    if (o.x == null || o.y == null) {
+      const c = o.corner || "top-left";
+      return { x: c.includes("left") ? M : W - w - M, y: c.includes("top") ? M : H - h - M };
+    }
+    return { x: Math.min(Math.max(o.x, 0), Math.max(0, W - w)), y: Math.min(Math.max(o.y, 0), Math.max(0, H - h)) };
+  }
+  demoDrop(x, y, w, h, W, H) {
+    const o = DemoOverlay.load();
+    if (o.snap) {
+      o.corner = (y + h / 2 < H / 2 ? "top" : "bottom") + "-" + (x + w / 2 < W / 2 ? "left" : "right");
+      o.x = o.y = null;
+    } else { o.x = Math.min(Math.max(x, 0), Math.max(0, W - w)); o.y = Math.min(Math.max(y, 0), Math.max(0, H - h)); }
+    DemoOverlay.save(o);
+  }
+}
+
 class DemoApi {
   constructor() {
     this.t0 = Date.now();
@@ -89,7 +147,7 @@ class DemoApi {
     return v.toFixed(1) + " " + d.unit;
   }
   // ------------------------------------------------------------ api
-  async info() { const ui = this.uiCfg || {}; return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.9.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
+  async info() { const ui = this.uiCfg ||= this._uiLoad(); return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.10.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
   status() { return { "LibreHardwareMonitor": "active", "liquidctl (fan hubs / AIOs)": "active", "NVIDIA NVML": "active", psutil: "active" }; }
   async snapshot() {
     this.sample(0);
@@ -280,10 +338,6 @@ class DemoApi {
         temp_avg: avg(col(3)), temp_max: Math.max(...col(3)), hotspot_max: Math.max(...col(5)), hotspot_delta_max: 16, usage_avg: 98, pct_power_limited: k > 1 ? 62 : 85, pct_thermal_limited: k > 1 ? 18 : 0,
         fan_pct_max: 68, vram_used_max: 6900, vram_total: 12288, spikes: k > 1 ? 9 : 4, driver_resets: 0, app: "Heaven.exe" }, trace: tr };
   }
-  async overlay_config() { const o = this.cfg?.overlay || {}; return { mode: o.mode || "full", show_fps: !!o.show_fps, size: o.size || "m", opacity: o.opacity ?? 0.85, fps_color: o.fps_color || "auto", edit: !!this.ovEdit }; }
-  async overlay_edit(on) { this.ovEdit = !!on; return { edit: this.ovEdit, x: on ? null : 400, y: on ? null : 60 }; }
-  async overlay_corner() { return true; }
-  async overlay_fit() { return true; }
   async overlay_fps() {
     const t = Date.now() / 1000, fps = 141 + Math.round(Math.sin(t) * 6);
     return { state: "ok", app: "Cyberpunk2077.exe", fps, low1: 104 + Math.round(Math.sin(t / 3) * 4), frametime: +(1000 / fps).toFixed(2) };
@@ -303,7 +357,8 @@ class DemoApi {
   }
   async gpu_runs() { return this.gtRuns ||= []; }
   async gpu_run_edit(id, label, score, del) { const r = this.gtRuns || []; const x = r.find(q => q.id === id); if (x && del) r.splice(r.indexOf(x), 1); else if (x && score) x.stats.score = +score; return r; }
-  async ui_set(v) { Object.assign(this.uiCfg ||= {}, v); return this.uiCfg; }
+  async ui_set(v) { Object.assign(this.uiCfg ||= this._uiLoad(), v); try { localStorage.setItem("riglab.demo.ui", JSON.stringify(this.uiCfg)); } catch { /* ignore */ } return this.uiCfg; }
+  _uiLoad() { try { return JSON.parse(localStorage.getItem("riglab.demo.ui") || "{}"); } catch { return {}; } }
   async light_reset() { return true; }
   async light_connect() { this.lightPaused = false; this.lightT = Date.now(); return true; }
   async light_pause(on) { this.lightPaused = on; return on; }
@@ -358,10 +413,10 @@ class DemoApi {
       { id: "net_throttle", name: "Multimedia network throttling", desc: "Windows limits network traffic while media plays. OFF can help online games.", on: true, admin: true, reboot: true, cat: "Network" }],
       plans: [{ guid: "a", name: "Balanced", active: true }, { guid: "b", name: "High performance", active: false }, { guid: "c", name: "Power saver", active: false }],
       gpu: { name: "NVIDIA GeForce RTX 4070 SUPER", min: 100, max: 242, cur: 220 },
-      startup: [{ i: 0, name: "Discord", cmd: "C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe --processStart Discord.exe", where: "Current user", on: true },
-        { i: 1, name: "Steam", cmd: "\"C:\\Program Files (x86)\\Steam\\steam.exe\" -silent", where: "Current user", on: true },
-        { i: 2, name: "OpenRGB", cmd: "C:\\Program Files\\OpenRGB\\OpenRGB.exe --startminimized --server", where: "Current user", on: true },
-        { i: 3, name: "EpicGamesLauncher", cmd: "\"C:\\Program Files (x86)\\Epic Games\\Launcher\\EpicGamesLauncher.exe\" -silent", where: "Current user", on: false }] };
+      startup: [{ i: 0, name: "Discord", cmd: "C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe --processStart Discord.exe", where: "Current user", on: true, impact: "High", why: "A big app that also connects to the internet when it starts. It can slow Windows down for a while." },
+        { i: 1, name: "Steam", cmd: "\"C:\\Program Files (x86)\\Steam\\steam.exe\" -silent", where: "Current user", on: true, impact: "High", why: "A big app that also connects to the internet when it starts. It can slow Windows down for a while." },
+        { i: 2, name: "OpenRGB", cmd: "C:\\Program Files\\OpenRGB\\OpenRGB.exe --startminimized --server", where: "Current user", on: true, impact: "Low", why: "A small helper. It barely affects how fast Windows starts." },
+        { i: 3, name: "EpicGamesLauncher", cmd: "\"C:\\Program Files (x86)\\Epic Games\\Launcher\\EpicGamesLauncher.exe\" -silent", where: "Current user", on: false, impact: "High", why: "A big app that also connects to the internet when it starts. It can slow Windows down for a while." }] };
   }
   async tweak_set(id, on) { const t = (this.tw ||= {}); const before = t[id] ?? null; t[id] = on; this._log("tweak", `${(window.EXPLAIN_DATA.actions["tweak." + id] || {}).label || id}: ${on ? "on" : "off"}`, { id, on: before }, { id, on }); return "ok"; }
   async tweaks_recommended() { await this.tweak_set("game_mode", true); return { ok: true, changed: ["game_mode"], msg: "Done - games should run a little smoother" }; }
@@ -389,21 +444,88 @@ class DemoApi {
     c.push(e); return e;
   }
   // ---------------------------------------------------------------- PC health dial (preview)
-  async health_last() { return { last: this.hlast || null, history: this.hhist || [] }; }
-  async health_quick() {
-    await new Promise(r => setTimeout(r, 2500));
-    const L = window.EXPLAIN_DATA.lights, say = (k, st) => L[k].say[st];
-    const it = (id, st, extra = {}) => ({ id, title: L[id].name, state: st, say: say(id, st), page: null, fix: null, ...extra });
-    const items = [it("cpu_temp", "good"), it("gpu_temp", "good"), it("ram_load", "good"),
-      it("disk_free", "warn", { say: say("disk_free", "warn") + " (48 GB free)", page: "tweaks", fix: "Free up space" }),
-      it("fans", "good"), it("crashes", "warn", { page: "crashes", fix: "Find out why" }), it("drives", "good")];
-    const score = 100 - 2 * 8;
-    const t = Date.now() / 1000;
-    this.hlast = { time: t, kind: "quick", score, state: score >= 80 ? "good" : score >= 50 ? "warn" : "bad",
-      summary: `${score}% \u2014 Your PC is in good health. A few things need checking.`, items };
-    (this.hhist ||= []).push({ time: t, score });
-    return this.hlast;
+  async health_last() {
+    if (!this.hhist) { const d = 86400, n = Date.now() / 1000; this.hhist = [[-21, 76], [-14, 81], [-7, 88]].map(([x, v]) => ({ time: n + x * d, score: v, kind: "quick" })); }
+    return { last: this.hlast || null, history: this.hhist };
   }
+  /* Preview: a fake check that runs in a few seconds. Set App.api.demoOffline / demoNorton in the console to see
+     the "no internet" and third-party antivirus messages. */
+  _hItems(kind) {
+    const L = window.EXPLAIN_DATA.lights, say = (k, st) => L[k].say[st];
+    const it = (id, st, extra = {}) => ({ id, title: L[id] ? L[id].name : id, state: st, say: L[id] ? say(id, st) : "", page: null, fix: null, ...extra });
+    const steps = [
+      ["Checking temperatures, memory, space, fans, drives and crashes", 1.2, () => [it("cpu_temp", "good"), it("gpu_temp", "good"), it("ram_load", "good"),
+        it("disk_free", "warn", { say: say("disk_free", "warn") + " (48 GB free)", page: "storage", fix: "Free up space" }), it("fans", "good"),
+        it("crashes", "warn", { page: "crashes", fix: "Find out why" }), it("drives", "good")]],
+      ["Checking virus protection", 0.6, () => [this.demoNorton ? { id: "virus_protection", title: "Virus protection", state: "good", say: "Your PC is protected by Norton 360." }
+        : { id: "virus_protection", title: "Virus protection", state: "good", say: "Windows Defender is on and up to date.", details: '{"AMRunningMode":"Normal","AntivirusSignatureAge":0}' }]],
+      ["Looking for problems in Device Manager", 0.6, () => [{ id: "devices", title: "Devices", state: "warn", say: "SM Bus Controller has no driver installed.",
+        action: { id: "open_devices", label: "Open Device Manager" }, details: "[28] SM Bus Controller - System PCI\\VEN_1022&DEV_790B" }]],
+      ["Checking keyboard, mouse, screens, sound, network and USB", 0.6, () => [{ id: "io", title: "Inputs and outputs", state: "good",
+        say: "Keyboard, mouse, screens, sound, network and USB are all working.", lines: ["Keyboard: 2 working", "Mouse or touchpad: 1 working", "Screen: 2 working",
+          "Speakers, headphones and microphones: 4 working", "Network: 2 working", "USB ports: 9 working"] }]],
+      ["Looking for memory test results", 0.4, () => [{ id: "memory", title: "Memory test", state: "none", action: { id: "memtest", label: "Test my memory on the next restart" },
+        say: "Your memory hasn't been tested yet. Windows can test it the next time your PC restarts (it takes about 15 minutes)." }]]];
+    if (kind === "full") steps.push(
+      ["Checking for Windows updates", 1.5, () => [this.demoOffline ? { id: "updates", title: "Windows updates", state: "none", skipped: true, say: "Skipped - no internet connection. RigLab will check this next time you're online." }
+        : { id: "updates", title: "Windows updates", state: "warn", say: "2 Windows updates are waiting to be installed.", action: { id: "open_updates", label: "Open Windows Update" },
+          details: "2026-11 Cumulative Update for Windows 11 (KB5050000)\nWindows Malicious Software Removal Tool" }]],
+      ["Checking how old your drivers are", 1, () => [{ id: "drivers", title: "Driver age", state: "warn", say: "3 drivers are over 2 years old. This is often fine, but newer ones can fix bugs.",
+        action: { id: "open_driver_updates", label: "Look for driver updates" }, details: "Realtek High Definition Audio - Realtek 6.0.9239 (2021-08-11, 5 years old)" }]],
+      ["Checking Windows' repair store (DISM)", 2.5, () => [{ id: "windows_image", title: "Windows repair store", state: "good", say: "The copy of Windows that repairs your PC is healthy.", details: "No component store corruption detected." }]],
+      ["Checking Windows system files (sfc)", 3, () => [{ id: "system_files", title: "Windows system files", state: "bad", say: "Some Windows files are damaged. Windows can usually repair them itself.",
+        action: { id: "sfc_repair", label: "Repair Windows files" }, details: "Windows Resource Protection found integrity violations." }]],
+      ["Scanning every file for viruses", 5, () => [this.demoNorton ? { id: "virus_scan", title: "Full virus scan", state: "none", say: "Your PC uses Norton 360 for virus protection, so RigLab can't run a Windows Defender scan. Run a full scan in Norton 360 instead." }
+        : { id: "virus_scan", title: "Full virus scan", state: "good", say: "No viruses or harmful files were found." }]]);
+    return steps;
+  }
+  async health_start(kind) {
+    if (this.hjob && this.hjob.running) return { busy: true, ...(await this.health_status()) };
+    const steps = this._hItems(kind);
+    this.hjob = { kind, steps, items: [], i: 0, t0: Date.now(), stepT0: Date.now(), running: true, cancelled: false, result: null };
+    return this.health_status();
+  }
+  async health_status() {
+    const j = this.hjob;
+    if (!j) return { running: false, items: [], result: null };
+    const now = Date.now();
+    while (j.running && !j.cancelled && j.i < j.steps.length && now - j.stepT0 >= j.steps[j.i][1] * 1000) {
+      j.items.push(...j.steps[j.i][2]()); j.stepT0 += j.steps[j.i][1] * 1000; j.i++;
+    }
+    if (j.running && j.i >= j.steps.length) {
+      j.running = false;
+      if (j.kind === "repair") { /* nothing to score */ } else {
+        const lost = j.items.reduce((a, x) => a + (x.state === "warn" ? 8 : x.state === "bad" ? 25 : 0), 0);
+        const score = Math.max(0, 100 - lost), n = j.items.filter(x => x.state === "warn" || x.state === "bad").length;
+        const state = score >= 80 ? "good" : score >= 50 ? "warn" : "bad";
+        const lead = { good: "Your PC is in good health.", warn: "Your PC needs some attention.", bad: "Your PC has problems that need fixing soon." }[state];
+        const more = !n ? "" : n === 1 ? " One thing needs checking." : state === "good" ? " A few things need checking." : ` ${n} things need checking.`;
+        j.result = { time: now / 1000, kind: j.kind, score, state, summary: `${score}% \u2014 ${lead}${more}`, items: j.items };
+        this.hlast = j.result; (this.hhist ||= []).push({ time: j.result.time, score, kind: j.kind });
+      }
+    }
+    const tot = j.steps.reduce((a, x) => a + x[1], 0), done = j.steps.slice(0, j.i).reduce((a, x) => a + x[1], 0);
+    const cur = j.steps[j.i], el = cur ? Math.min((now - j.stepT0) / 1000, cur[1] * 0.95) : 0;
+    const left = Math.max(0, tot - done - el);
+    return { kind: j.kind, running: j.running, cancelled: j.cancelled, step: cur && j.running ? cur[0] : "", index: Math.min(j.i + 1, j.steps.length), count: j.steps.length,
+      progress: j.running ? Math.min(0.99, (done + el) / tot) : 1, eta: left, eta_text: j.running ? (left < 45 ? "less than a minute left" : `about ${Math.round(left / 60)} minutes left`) : "",
+      items: j.items.slice(), result: j.result, error: null };
+  }
+  async health_cancel() { if (this.hjob && this.hjob.running) { this.hjob.cancelled = true; this.hjob.running = false; } return true; }
+  async health_quick() { await this.health_start("quick"); this.hjob.steps.forEach(x => { x[1] = 0; }); return (await this.health_status()).result; }
+  async health_fix(id) {
+    const labels = { sfc_repair: "Repair Windows files", dism_repair: "Repair Windows' repair store", memtest: "Test my memory on the next restart" };
+    if (id === "sfc_repair" || id === "dism_repair") {
+      this.hjob = { kind: "repair", steps: [[labels[id], 4, () => [{ id: "system_files", title: "Windows system files", state: "good", say: "Windows repaired its files. Restart your PC to finish." }]]],
+        items: [], i: 0, t0: Date.now(), stepT0: Date.now(), running: true, cancelled: false, result: null };
+      this._log("fix", "Fix it: " + labels[id], null, null, false, "fix", "Medium");
+      return { ok: true, msg: "Started", ...(await this.health_status()) };
+    }
+    if (id === "memtest") this._log("fix", "Fix it: scheduled Windows' memory test", null, null, false, "fix", "Low");
+    return { ok: true, msg: "Opened (preview mode)" };
+  }
+  async health_history() { return this.hhist || []; }
+  async health_save_text() { return this.hlast ? { ok: true, msg: "Report saved: Documents\\RigLab reports\\RigLab health report (preview).txt" } : { ok: false, msg: "Run a check first" }; }
   // ---------------------------------------------------------------- presets (preview): same rules as core/presets.py
   _pcur() { return (this.pcur ||= { plan: "balanced", fans: "Balanced", tweaks: { game_mode: true, game_dvr: true, notifications: true, transparency: true } }); }
   async preset_state() {
@@ -441,6 +563,39 @@ class DemoApi {
     this._log("preset", `Applied the ${p.name} preset`, before, { preset: id }, true, "you", p.risk).detail = p.changes.map(x => x.text).join(" ");
     return { ok: true, changed: p.changes.length, msg: `${p.name} preset applied. You can undo it in Change history.` };
   }
+  // ---------------------------------------------------------------- extras (preview)
+  async explain_pc() {
+    await new Promise(r => setTimeout(r, 500));
+    return { items: [
+      { id: "cpu", icon: "cpu", title: "Processor (the brain)", state: "none", say: "Your processor is an AMD Ryzen 7 7800X3D 8-Core Processor. It has 8 cores, so it can work on 8 jobs at once (16 with its extra threads). That's plenty for gaming, streaming and heavy apps.", details: "Model: AMD Ryzen 7 7800X3D 8-Core Processor\nCores / Threads: 8 / 16\nMax clock: 4201 MHz" },
+      { id: "gpu", icon: "gpu", title: "Graphics", state: "none", say: "Your graphics card is an NVIDIA GeForce RTX 4070 SUPER. It draws everything you see, and it's what matters most for games.", details: "Model: NVIDIA GeForce RTX 4070 SUPER\nDriver: 32.0.15.6614 (2026-10-21)" },
+      { id: "memory", icon: "ram", title: "Memory", state: "good", say: "Your PC has 32 GB of memory (RAM). Memory holds what you're working on right now. That's lots - great for gaming, streaming and video editing.", details: "Total: 32.0 GB\nType: DDR5\nRunning speed: 6000 MT/s" },
+      { id: "storage", icon: "disk", title: "Storage", state: "good", say: "Your drive is an SSD. It's fast, so Windows starts quickly and games load fast. Your main drive is 61% full.", details: "Drive: Samsung SSD 990 PRO 2TB\nType: SSD (NVMe)" },
+      { id: "display", icon: "monitor", title: "Screens", state: "none", say: "You have 1 screen. Your main screen shows 2560 × 1440 pixels and updates 165 times a second (165 Hz). That's smooth - great for games.", details: "Monitor: LG ULTRAGEAR" },
+      { id: "windows", icon: "sys", title: "Windows", state: "none", say: "You're running Windows 11 Home.", details: "OS: Microsoft Windows 11 Home\nBuild: 10.0.26100 (64-bit)" },
+      { id: "board", icon: "board", title: "Motherboard", state: "none", say: "Everything plugs into your motherboard, a ASUS TUF GAMING B650-PLUS WIFI.", details: "Manufacturer: ASUSTeK COMPUTER INC.\nBIOS: American Megatrends 3222 (2026-03-14)" },
+      { id: "network", icon: "net", title: "Network", state: "none", say: "You're connected through Realtek Gaming 2.5GbE Family Controller at 1,000 megabits a second.", details: "Adapter: Realtek Gaming 2.5GbE Family Controller\nLink: 1000 Mbps" }] };
+  }
+  async storage_state() {
+    await new Promise(r => setTimeout(r, 300));
+    return { drives: [{ name: "C:\\", total: 2e12, free: 0.21e12, pct_free: 10.5 }, { name: "D:\\", total: 4e12, free: 2.9e12, pct_free: 72.5 }],
+      updates: this.updClean ? { bytes: 0, files: 0 } : { bytes: 3.4e9, files: 212 }, big: await this.storage_big_status() };
+  }
+  async storage_big_start() { this.big = { t0: Date.now(), removed: this.big?.removed || [] }; return this.storage_big_status(); }
+  async storage_big_status() {
+    if (!this.big) return { running: false, files: null };
+    const el = (Date.now() - this.big.t0) / 1000;
+    if (el < 2.5) return { running: true, files: null, elapsed: el };
+    const all = [["Call of Duty install backup.zip", "C:\\Users\\you\\Downloads", 48.2e9, "Archive"], ["Windows 11.iso", "C:\\Users\\you\\Downloads", 6.1e9, "Disk image"],
+      ["Holiday 2025.mp4", "C:\\Users\\you\\Videos", 4.4e9, "Video"], ["Stream recording 2026-10-02.mkv", "C:\\Users\\you\\Videos", 3.9e9, "Video"],
+      ["GameSetup.exe", "C:\\Users\\you\\Downloads", 1.2e9, "Installer"]].map(([n, f, s, k]) => ({ name: n, folder: f, path: f + "\\" + n, size: s, kind: k }));
+    return { running: false, finished: true, elapsed: el, files: all.filter(x => !this.big.removed.includes(x.path)) };
+  }
+  async storage_recycle(p) { (this.big ||= { t0: 0, removed: [] }).removed.push(p); this._log("recycle", "Moved " + p.split("\\").pop() + " to the Recycle Bin", null, null, false); return { ok: true, msg: "Moved to the Recycle Bin. You can put it back from there." }; }
+  async storage_show() { return true; }
+  async storage_clean_updates() { this.updClean = true; this._log("update_cache", "Removed 3.4 GB of old Windows update downloads", null, null, false); return { ok: true, bytes: 3.4e9, files: 212, msg: "Freed 3.4 GB" }; }
+  async weekly_state() { return { on: !!this.weekly, scheduled: !!this.weekly }; }
+  async weekly_set(on) { this._log("weekly", "Weekly quick check " + (on ? "on (Sundays at 7 pm)" : "off"), { on: !!this.weekly }, { on }); this.weekly = on; return { ok: true, msg: on ? "Weekly check is on. It runs on Sundays at 7 pm." : "Weekly check is off." }; }
   async pc_status() { return { disk_free_pct: 23.4, disk_free: 220e9, crashes: this.crashScanned ? 1 : null }; }
   async changes_list() {
     if (!this.changes) {   // a little history so the page isn't empty in preview
@@ -459,7 +614,14 @@ class DemoApi {
     const n = this._log(e.kind, "Undid: " + e.title, e.after, e.before, false, "undo", e.risk); e.undone_by = n.id;
     return { ok: true, msg: "Put back the way it was" };
   }
-  async settings() { return this.cfg; }
+  async settings() { this.cfg.overlay = DemoOverlay.load(); return this.cfg; }
+  async overlay_config() { return DemoOverlay.config(); }
+  async overlay_set(v) { return { overlay: DemoOverlay.set(v || {}), hotkey_ok: true }; }
+  async overlay_lock(on) { const o = DemoOverlay.load(); o.locked = !!on; if (!on) o.enabled = true; DemoOverlay.save(o); return { locked: o.locked, x: o.x, y: o.y }; }
+  async overlay_edit(on) { const r = await this.overlay_lock(!on); return { edit: !r.locked, x: r.x, y: r.y }; }
+  async overlay_minimise(on) { const o = DemoOverlay.load(); o.minimised = !!on; DemoOverlay.save(o); return { minimised: o.minimised }; }
+  async overlay_corner(c) { const o = DemoOverlay.load(); o.corner = c; o.x = o.y = null; DemoOverlay.save(o); return true; }
+  async overlay_fit() { return true; }
   async save_settings(c) { this.cfg = c; return true; }
   async log_toggle() { this.logging = !this.logging; return { active: this.logging, path: "sensors_20261114.csv" }; }
   async open_folder() { return true; }

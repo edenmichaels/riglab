@@ -1,5 +1,33 @@
-RigLab 3.9.0
-============
+RigLab 3.10.0
+=============
+
+NEW IN 3.10.0
+  Help
+  - A short walkthrough the first time RigLab opens (skip it, or replay it from Settings).
+  - A tip at the top of each page, with "Got it" and "Don't show again".
+  - "Start here" on Home: My PC is slow / My games stutter / Check if my PC is healthy / Clean up space.
+  PC health
+  - Quick check and Full check. The full check adds a Windows Defender virus scan, sfc and DISM checks,
+    driver ages and Windows updates. Every check also looks at Device Manager, and at keyboard, mouse,
+    screens, sound, network and USB. Progress, time left, Cancel, "skipped, no internet" when offline,
+    a score-over-time chart, and Save report (text, or PDF with Microsoft Print to PDF).
+  - Fix it buttons: repair Windows files (sfc), repair the Windows store (DISM, needs internet), test memory
+    on the next restart, and shortcuts to Windows Update, Device Manager and Windows Security.
+  - If you use another antivirus (e.g. Norton), RigLab says so instead of running a Defender scan.
+  Extras
+  - My PC explained: your hardware in plain English.
+  - Free up space: drive space, temporary files, old Windows update files and your biggest files
+    (moved to the Recycle Bin, never deleted outright).
+  - Startup apps show a High / Medium / Low impact rating.
+  - Optional weekly quick check (Sundays at 7 pm) with a notification. Off unless you turn it on.
+  Look and feel
+  - Themes: Dark, Light, Dracula, Nord, Catppuccin Mocha, Gruvbox, Solarized Dark, Tokyo Night, One Dark,
+    High Contrast (credits in Settings > About). Text size: Small / Normal / Large / Extra Large (Aa button).
+  In-game overlay
+  - Pick exactly what it shows (FPS, 1% lows, frame time, CPU/GPU temps, usage, clocks, RAM, graph),
+    side by side or stacked, size, background, text colour. Presets: Minimal, Standard, Full.
+  - Unlock to drag it anywhere (it stays on screen, and can snap to corners), shrink it to a dot,
+    lock it so clicks go to your game, and an optional show/hide key.
 
 NEW IN 3.9.0
   - Simple / Advanced switch in the top bar of every page. It switches instantly and remembers your choice.
@@ -38,7 +66,7 @@ INSTALL (once)
   2. Open the extracted folder and double-click  "Build RigLab Installer.bat".
      The first build takes 5-10 minutes; later builds take 1-2.
      It sets up everything it needs by itself and keeps it in %LOCALAPPDATA%\RigLab-build.
-  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.9.0.exe.
+  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.10.0.exe.
      Double-click it: RigLab installs to Program Files with Start-menu and desktop shortcuts.
 
 UPDATE

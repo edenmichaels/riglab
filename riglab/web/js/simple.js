@@ -173,21 +173,48 @@ function riskKey() {
 
 // ------------------------------------------------------------------ health dial (shared by Home and PC Health)
 const Health = {
-  last: null, history: [], running: false, loaded: false, subs: new Set(),
+  last: null, history: [], running: false, loaded: false, subs: new Set(), job: null, timer: null,
   async load(force) {
     if (this.loaded && !force) return this.emit();
     try { const r = await App.api.health_last(); this.last = r.last; this.history = r.history || []; } catch { /* keep */ }
+    try { const st = await App.api.health_status(); if (st && st.running) { this.job = st; this.running = st.kind !== "repair"; this.poll(); } } catch { /* none */ }
     this.loaded = true; this.emit();
   },
-  async run() {
-    if (this.running) return;
-    this.running = true; this.emit();
-    try {
-      const r = await App.api.health_quick();
-      if (r && !r.busy) { this.last = r; if (r.score != null) this.history.push({ time: r.time, score: r.score }); }
-    } catch (e) { toast("The check didn't finish: " + e, true); }
-    this.running = false; this.emit();
+  /* kind: "quick" or "full". Runs in the background; progress comes from health_status() every second. */
+  async run(kind = "quick") {
+    if (this.job && this.job.running) return;
+    let st;
+    try { st = await App.api.health_start(kind); } catch (e) { toast("The check couldn't start: " + e, true); return; }
+    this.job = st; this.running = true; this.emit(); this.poll();
   },
+  async fix(id) {
+    const r = await App.api.health_fix(id);
+    toast(r.msg, !r.ok);
+    if (r.ok && r.running) { this.job = r; this.emit(); this.poll(); }
+    return r;
+  },
+  poll() {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(async () => {
+      let st;
+      try { st = await App.api.health_status(); } catch { st = null; }
+      if (!st) return this.poll();
+      this.job = st;
+      if (!st.running) {
+        if (st.kind !== "repair" && st.result) {
+          this.last = st.result;
+          if (st.result.score != null) this.history.push({ time: st.result.time, score: st.result.score, kind: st.result.kind });
+          toast(st.result.summary);
+        } else if (st.cancelled) toast("Check cancelled. Nothing was saved.");
+        else if (st.kind === "repair") toast((st.items[0] || {}).say || "Repair finished");
+        this.running = false; this.emit();
+        if (st.kind === "repair") this.job = null;
+        return;
+      }
+      this.emit(); this.poll();
+    }, 1000);
+  },
+  async cancel() { try { await App.api.health_cancel(); } catch { /* ignore */ } },
   emit() { for (const f of [...this.subs]) f(); },
 };
 
@@ -207,29 +234,35 @@ function healthDial(opts = {}) {
   const draw = () => {
     if (mounted && !box.isConnected) { Health.subs.delete(draw); return; }
     if (box.isConnected) mounted = true;
-    const r = Health.last, running = Health.running;
+    const r = Health.last, running = Health.running, job = Health.job || {};
     const v = r && r.score != null ? r.score : null, st = running ? "none" : (r ? r.state : "none");
-    const R = 88, C = 2 * Math.PI * R, pct = v == null || running ? 0 : v / 100;
-    const col = { good: "var(--good)", warn: "var(--warn)", bad: "var(--bad)", none: "var(--faint)" }[st];
+    const R = 88, C = 2 * Math.PI * R, pct = running ? (job.progress || 0) : v == null ? 0 : v / 100;
+    const col = running ? "var(--accent)" : { good: "var(--good)", warn: "var(--warn)", bad: "var(--bad)", none: "var(--faint)" }[st];
     const ring = h("div.hdial" + (opts.link ? ".link" : ""), {
       role: opts.link ? "button" : null, tabIndex: opts.link ? 0 : null, title: opts.link ? "Open PC Health" : null,
       onclick: opts.link ? () => go("dashboard") : null, onkeydown: opts.link ? (e) => { if (e.key === "Enter") go("dashboard"); } : null });
     ring.innerHTML = `<svg viewBox="0 0 220 220" aria-hidden="true"><circle cx="110" cy="110" r="${R}" fill="none" stroke="var(--line)" stroke-width="16"/>
-      <circle cx="110" cy="110" r="${R}" fill="none" stroke="${col}" stroke-width="16" stroke-linecap="round" transform="rotate(-90 110 110)"
+      <circle cx="110" cy="110" r="${R}" fill="none" stroke="${col}" stroke-width="16" stroke-linecap="${pct > 0 ? "round" : "butt"}" transform="rotate(-90 110 110)"
         stroke-dasharray="${C * pct} ${C}" style="transition:stroke-dasharray .8s, stroke .6s;filter:drop-shadow(0 0 8px ${col})"/></svg>`;
     const mid = h("div.hdial-mid");
-    if (running) mid.append(h("div.spinner"), h("div.small.muted", { style: { marginTop: "10px" } }, "Checking…"));
+    if (running) mid.append(h("div.hdial-num", { style: { color: "var(--accent)", fontSize: "44px" } }, Math.round((job.progress || 0) * 100), h("small", "%")),
+      h("div.small.muted", job.kind === "full" ? "Full check" : "Quick check"));
     else if (v == null) mid.append(h("div.hdial-none", "Not checked yet"));
     else mid.append(h("div.hdial-num", { style: { color: col } }, v, h("small", "%")), h("div.small.muted", "PC health"));
     ring.append(mid);
     ring.setAttribute("aria-label", running ? "Checking your PC" : v == null ? "PC health: not checked yet" : `PC health ${v} out of 100`);
-    const line = running ? "Checking temperatures, memory, space, fans, drives and crashes. This takes about 20 seconds."
-      : v == null ? "Run a quick check to get a health score for your PC." : r.summary;
+    const both = opts.both;          // PC Health shows Quick and Full; Home keeps it to one button
+    const buttons = running ? h("div.stack", { style: { gap: "8px", alignItems: "center" } },
+        h("div.small", (job.step || "Starting…") + (job.count ? ` (step ${job.index} of ${job.count})` : "")),
+        h("div.small.muted", job.eta_text || ""),
+        h("button.btn.sm", { onclick: () => Health.cancel() }, icon("stop"), "Cancel"))
+      : h("div.row", { style: { gap: "10px", justifyContent: "center", flexWrap: "wrap" } },
+        v != null ? h("span.small.muted", (r.kind === "full" ? "Full check " : "Quick check ") + ago(r.time) + ".") : null,
+        actionBtn("health.quick", () => Health.run("quick"), { cls: v == null ? "primary" : "sm", icon: "heart", always: true, label: v == null ? "Run a quick check" : "Quick check" }),
+        both ? actionBtn("health.full", () => Health.run("full"), { cls: "sm", icon: "search", always: true }) : null);
     box.replaceChildren(ring,
-      h("div.hdial-say", line),
-      running ? null : h("div.row", { style: { gap: "10px", justifyContent: "center", flexWrap: "wrap" } },
-        v == null ? actionBtn("health.quick", () => Health.run(), { cls: "primary", icon: "heart", always: true })
-          : [h("span.small.muted", "Checked " + ago(r.time) + "."), h("button.btn.sm.ghost", { onclick: () => Health.run() }, icon("refresh"), "Check again")]));
+      h("div.hdial-say", running ? "Checking your PC. You can keep using it while this runs." : v == null ? "Run a quick check to get a health score for your PC." : r.summary),
+      buttons);
   };
   Health.subs.add(draw);
   draw();

@@ -8,7 +8,8 @@
 <script>
 /* apply the saved theme before anything is drawn (no flash of the wrong theme) */
 try { const t = JSON.parse(localStorage.getItem("riglab.theme") || "{}"); const m = t.theme === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : (t.theme || "dark");
-  document.documentElement.dataset.theme = m; document.documentElement.dataset.accent = t.accent || "cyan"; } catch (e) { document.documentElement.dataset.theme = "dark"; }
+  document.documentElement.dataset.theme = m; document.documentElement.dataset.accent = t.accent || "cyan";
+  if (t.text_scale) document.documentElement.style.setProperty("--zoom", t.text_scale); } catch (e) { document.documentElement.dataset.theme = "dark"; }
 </script>
 </head>
 <body>
@@ -29,5 +30,7 @@ try { const t = JSON.parse(localStorage.getItem("riglab.theme") || "{}"); const 
 <script src="js/pages_oc.js"></script>
 <script src="js/pages_crash.js"></script>
 <script src="js/pages_history.js"></script>
+<script src="js/pages_extras.js"></script>
+<script src="js/tour.js"></script>
 </body>
 </html>

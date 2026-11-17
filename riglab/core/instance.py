@@ -61,8 +61,18 @@ def _kill_strays() -> str:
     return ""
 
 
-def serve(on_quit):
-    """Listen for 'quit' from a newer copy."""
+def ask(cmd: str) -> bool:
+    """Send a command (e.g. 'check') to a running RigLab. True if one answered."""
+    try:
+        with socket.create_connection(("127.0.0.1", PORT), timeout=1) as s:
+            s.sendall(cmd.encode() + b"\n")
+            return True
+    except OSError:
+        return False
+
+
+def serve(on_quit, on_check=None):
+    """Listen for 'quit' from a newer copy, and 'check' from the weekly scheduled check."""
     def run():
         try:
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -74,7 +84,11 @@ def serve(on_quit):
         while True:
             conn, _ = srv.accept()
             with conn:
-                if conn.recv(16).startswith(b"quit"):
+                msg = conn.recv(16)
+                if msg.startswith(b"check") and on_check:
+                    threading.Thread(target=on_check, name="WeeklyCheck", daemon=True).start()
+                    continue
+                if msg.startswith(b"quit"):
                     log.info("newer RigLab started - closing this copy")
                     srv.close()
                     on_quit()

@@ -74,23 +74,26 @@ App.pages.tweaks = {
       parts.push(gcard);
     }
 
-    const startup = h("div.card.mt", cardHead(S ? "Apps that open when Windows starts" : "Startup apps", "power", infoBtn("startup.toggle")),
+    const IMPACT = { High: "bad", Medium: "warn", Low: "good" };
+    const startup = h("div.card.mt", { "data-anchor": "startup" }, cardHead(S ? "Apps that open when Windows starts" : "Startup apps", "power", infoBtn("startup.toggle")),
       h("div.sub", S ? "Fewer apps here means Windows starts faster. Switching one off doesn't delete it - you can still open it yourself." : "Turn off apps you don't need starting with Windows. Same switch Task Manager uses - nothing is deleted."),
       st.startup.length ? h("div", st.startup.map(x => {
+        const pill = x.impact ? h("span.pill.impact." + IMPACT[x.impact], { title: x.why, style: { marginLeft: "8px" } }, x.impact + " impact") : null;
         const row = switchRow("startup.toggle", x.on, async (v) => { const r = await App.api.startup_set(x.i, v); if (r !== "ok") { toast(r, true); return false; } return true; },
-          { label: x.name, desc: S ? (x.on ? "Opens when Windows starts" : "Doesn't open by itself") : x.where + " · " + (x.cmd.length > 90 ? x.cmd.slice(0, 90) + "…" : x.cmd) });
+          { label: x.name, pills: pill ? [pill] : [], desc: S ? (x.why || (x.on ? "Opens when Windows starts" : "Doesn't open by itself")) : x.where + " · " + (x.cmd.length > 90 ? x.cmd.slice(0, 90) + "…" : x.cmd) });
         if (!S) row.querySelector(".d").title = x.cmd;
         return row;
-      })) : h("div.muted.small", "Nothing found."));
+      })) : h("div.muted.small", "Nothing found."),
+      h("details.key", h("summary", "What do the impact ratings mean?"), h("div.key-body",
+        h("div.key-row", h("span.pill.bad.impact", "High impact"), "Slows Windows down for a while after it starts. Good to switch off if you don't need it straight away."),
+        h("div.key-row", h("span.pill.warn.impact", "Medium impact"), "Uses a little time and memory when Windows starts."),
+        h("div.key-row", h("span.pill.good.impact", "Low impact"), "A small helper. It barely affects start-up."),
+        h("div.small.muted", "These are RigLab's estimates from the app's name and size. Windows doesn't say exactly."))));
     parts.push(startup);
 
-    const junkTxt = h("span.muted.small", "");
     parts.push(h("div.card.mt", cardHead(S ? "Free up space" : "Junk cleanup", "trash"),
-      h("div.sub", S ? "Deletes temporary files Windows and games don't need any more. Your own files are never touched." : "Deletes temp files and shader caches older than 24 h. Files in use are skipped. Games rebuild shader caches on next launch."),
-      h("div.row.wrap", { style: { gap: "10px" } },
-        actionBtn("junk.scan", async () => { junkTxt.textContent = "Looking…"; const r = await App.api.junk(false); junkTxt.textContent = `${fmt.bytes(r.bytes)} can be freed (${fmt.n(r.files)} files)`; }, { icon: "search", label: S ? undefined : "Scan" }),
-        actionBtn("junk.clean", async () => { junkTxt.textContent = "Cleaning…"; const r = await App.api.junk(true); junkTxt.textContent = `Freed ${fmt.bytes(r.bytes)} (${fmt.n(r.files)} files)`; }, { icon: "trash", label: S ? undefined : "Clean" }),
-        junkTxt)));
+      h("div.sub", "Temporary files, old Windows update files and your biggest files are now on their own page."),
+      h("button.btn", { onclick: () => go("storage") }, icon("trash"), S ? "Go to Free up space" : "Open Storage cleanup")));
     this.body.replaceChildren(...parts);
   },
 };
@@ -175,64 +178,129 @@ App.pages.health = {
 };
 
 // =================================================================== Settings
-function overlayCard(ov) {
-  ov.mode = ov.mode || "full"; ov.size = ov.size || "m"; ov.fps_color = ov.fps_color || "auto";
-  if (ov.opacity == null) ov.opacity = 0.85;
-  const box = h("div.card");
-  const STYLES = [["full", "Full stats (CPU, GPU, RAM)"], ["fps", "FPS counter: number only"], ["fps_low", "FPS counter: + 1% low"],
-    ["fps_time", "FPS counter: + frame time"], ["fps_detail", "FPS counter: detailed (1% low, frame time, game)"], ["fps_graph", "FPS counter: + frame-time graph"]];
-  let moving = false;
-  const moveBtn = h("button.btn.sm", { onclick: async () => {
-    const r = await App.api.overlay_edit(!moving); moving = !!r.edit; ov.enabled = true;
-    moveBtn.replaceChildren(icon(moving ? "check" : "move"), moving ? "Done moving" : "Move overlay");
-    toast(moving ? "Drag the overlay where you want it, then click Done" : "Position saved"); draw(); } }, icon("move"), "Move overlay");
+const OV_STATS = [["fps", "FPS"], ["low1", "1% lows"], ["frametime", "Frame time"], ["cpu_temp", "CPU temp"], ["gpu_temp", "GPU temp"],
+  ["cpu_load", "CPU usage"], ["gpu_load", "GPU usage"], ["ram", "RAM"], ["cpu_clock", "CPU clock"], ["gpu_clock", "GPU clock"], ["graph", "Frame-time graph"]];
+const OV_PRESETS = [["minimal", "Minimal", "FPS only"], ["standard", "Standard", "FPS + temperatures"], ["full", "Full", "Everything"]];
+
+/* Overlay settings. Every change applies straight away (no Save needed) and is saved. */
+function overlayCard(initial) {
+  let ov = Object.assign({}, initial);
+  const box = h("div.card#overlay-settings");
+  const set = async (values) => {
+    try { const r = await App.api.overlay_set(values); ov = r.overlay; if (values.hotkey !== undefined && !r.hotkey_ok) toast("That key combination is already used by another app. Try a different one.", true); }
+    catch (e) { toast("Couldn't change the overlay: " + e, true); }
+    draw();
+  };
+  const seg = (items, cur, onPick) => h("div.seg", items.map(([k, l]) => h("button" + (cur === k ? ".on" : ""), { "aria-pressed": cur === k, onclick: () => onPick(k) }, l)));
   const draw = () => {
-    const counter = ov.mode !== "full";
+    const S = isSimple(), stats = ov.stats || ["fps"];
+    const hk = h("input", { type: "text", readOnly: true, value: ov.hotkey || "", placeholder: "Click, then press keys", style: { width: "170px" }, "aria-label": "Show/hide hotkey",
+      onkeydown: (e) => {
+        e.preventDefault();
+        if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
+        if (e.key === "Escape" || e.key === "Backspace") { set({ hotkey: "" }); return; }
+        const k = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+        const combo = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", k].filter(Boolean).join("+");
+        if (!e.ctrlKey && !e.altKey && !/^F\d+$/.test(k)) { toast("Use Ctrl, Alt or Shift with a key (or an F key), so normal typing in games isn't caught.", true); return; }
+        set({ hotkey: combo });
+      } });
+    const more = [
+      h("div.small.muted", { style: { margin: "6px 0" } }, "What to show"),
+      h("div.chips", OV_STATS.map(([k, l]) => h("div.chip" + (stats.includes(k) ? ".on" : ""), { role: "checkbox", "aria-checked": stats.includes(k), tabIndex: 0,
+        onclick: () => { const st = stats.includes(k) ? stats.filter(x => x !== k) : [...stats, k]; if (!st.length) return toast("Keep at least one thing on the overlay", true); set({ stats: st }); } }, l))),
+      h("div.opt", h("div.t", "Layout"), seg([["horizontal", "Side by side"], ["vertical", "Stacked"]], ov.layout, (v) => set({ layout: v }))),
+      h("div.opt", h("div", h("div.t", "Text colour"), h("div.d", "Follow theme uses your RigLab theme's colours.")),
+        h("div.row", { style: { gap: "8px" } }, seg([["theme", "Follow theme"], ["white", "White"], ["custom", "Custom"]], /^#/.test(ov.text_color || "") ? "custom" : ov.text_color,
+          (v) => set({ text_color: v === "custom" ? "#36d6ff" : v })),
+          /^#/.test(ov.text_color || "") ? h("input", { type: "color", value: ov.text_color, "aria-label": "Custom text colour", onchange: (e) => set({ text_color: e.target.value }) }) : null)),
+      h("div.opt", h("div", h("div.t", "Colour numbers green / yellow / red"), h("div.d", "FPS and temperatures change colour when they're good, worth checking, or a problem.")),
+        switchEl(ov.fps_color !== "plain", (v) => set({ fps_color: v ? "auto" : "plain" }))),
+      h("div.opt", h("div", h("div.t", "Snap to the nearest corner"), h("div.d", "When you let go after dragging, it jumps neatly into the closest corner.")),
+        switchEl(!!ov.snap, (v) => set({ snap: v }))),
+      h("div.opt", h("div", h("div.t", "Show / hide key"), h("div.d", ov.hotkey ? `Press ${ov.hotkey} in any game to hide or show the overlay. Backspace clears it.` : "Optional. Pick a key combination to hide or show the overlay in any game.")),
+        h("div.row", { style: { gap: "6px" } }, hk, ov.hotkey ? h("button.btn.sm", { onclick: () => set({ hotkey: "" }) }, "Clear") : null)),
+      h("div.opt", h("div.t", "Move to a corner now"),
+        h("select", { "aria-label": "Move the overlay to a corner", onchange: async (e) => { if (!e.target.value) return; await App.api.overlay_corner(e.target.value); ov.x = ov.y = null; ov.corner = e.target.value; toast("Moved to the " + e.target.value.replace("-", " ") + " corner"); draw(); } },
+          h("option", { value: "" }, "Choose a corner…"), [["top-left", "Top left"], ["top-right", "Top right"], ["bottom-left", "Bottom left"], ["bottom-right", "Bottom right"]].map(([k, l]) => h("option", { value: k }, l)))),
+    ];
     box.replaceChildren(cardHead("In-game overlay", "overlay"),
-      h("div.sub", "Small always-on-top stats box. Works over games in borderless/windowed mode (not exclusive fullscreen). Clicks pass straight through it, except while you're moving it."),
-      h("div.opt", h("div.t", "Show overlay"), switchEl(ov.enabled, v => { ov.enabled = v; })),
-      h("div.opt", h("div.t", "Style"), h("select", { "aria-label": "Overlay style", onchange: e => { ov.mode = e.target.value; draw(); } },
-        STYLES.map(([k, l]) => h("option", { value: k, selected: ov.mode === k }, l)))),
-      !counter ? h("div.opt", h("div", h("div.t", "Show FPS"), h("div.d", "Adds an FPS row (FPS, 1% low, frame time) for the game in front, measured with PresentMon.")),
-        switchEl(!!ov.show_fps, v => { ov.show_fps = v; })) : h("div.small.muted", { style: { padding: "2px 0 8px" } }, "FPS is measured with PresentMon only while the overlay is showing. The counter hides itself when no game is in front."),
-      h("div.opt", h("div.t", "Text size"), h("select", { "aria-label": "Overlay text size", onchange: e => { ov.size = e.target.value; } },
-        [["s", "Small"], ["m", "Medium"], ["l", "Large"], ["xl", "Extra large"]].map(([k, l]) => h("option", { value: k, selected: ov.size === k }, l)))),
-      h("div.opt", h("div.t", "FPS colour"), h("select", { "aria-label": "FPS colour", onchange: e => { ov.fps_color = e.target.value; } },
-        [["auto", "By performance (green / yellow / red)"], ["white", "White"], ["accent", "Cyan"]].map(([k, l]) => h("option", { value: k, selected: ov.fps_color === k }, l)))),
-      h("div", { style: { padding: "6px 0" } }, sliderRow("Background", 0, 100, Math.round(ov.opacity * 100), 5, "%", v => { ov.opacity = v / 100; })),
-      h("div.opt", h("div", h("div.t", "Position"), h("div.d", ov.x != null ? "Where you dragged it" : "Corner: " + (ov.corner || "top-left"))),
-        h("div.row", { style: { gap: "6px" } }, moveBtn,
-          h("select", { "aria-label": "Snap overlay to a corner", onchange: async e => { if (!e.target.value) return; ov.corner = e.target.value; ov.x = ov.y = null; await App.api.overlay_corner(e.target.value); toast("Snapped to " + e.target.value); draw(); } },
-            h("option", { value: "" }, "Snap to corner…"), ["top-left", "top-right", "bottom-left", "bottom-right"].map(k => h("option", { value: k }, k))))),
-      h("div.small.faint", "Style, size, colour and background apply when you press Save."));
+      h("div.sub", "A small box on top of your games that shows FPS and other readings. It works in borderless and windowed games (not exclusive fullscreen)."),
+      h("div.opt", h("div.t", "Show overlay"), switchEl(!!ov.enabled, (v) => set({ enabled: v }))),
+      h("div.small.muted", { style: { margin: "8px 0 6px" } }, "Preset"),
+      h("div.row.wrap", { style: { gap: "8px" } }, OV_PRESETS.map(([k, l, d]) => h("button.btn.sm" + (ov.preset === k ? ".primary" : ""), { "aria-pressed": ov.preset === k, title: d, onclick: () => set({ preset: k }) }, l, h("span.small", { style: { opacity: .75, marginLeft: "6px" } }, d))),
+        ov.preset === "custom" ? h("span.pill", "Your own mix") : null),
+      h("div.opt", h("div.t", "Size"), seg([["s", "Small"], ["m", "Medium"], ["l", "Large"], ["xl", "Extra large"]], ov.size, (v) => set({ size: v }))),
+      h("div", { style: { padding: "6px 0" } }, sliderRow("Background", 0, 100, Math.round((ov.opacity ?? 0.85) * 100), 5, "%", debounce((v) => set({ opacity: v / 100 }), 250))),
+      h("div.opt", h("div", h("div.t", "Lock in place"), h("div.d", ov.locked !== false ? "Locked: clicks go straight through to your game." : "Unlocked: drag the overlay anywhere. Its – button shrinks it to a dot.")),
+        switchEl(ov.locked !== false, async (v) => { await App.api.overlay_lock(v); ov.locked = v; if (!v) ov.enabled = true; toast(v ? "Overlay locked" : "Overlay unlocked - drag it where you want it"); draw(); })),
+      h("div.opt", h("div", h("div.t", "Shrink to a dot"), h("div.d", "Hides the readings and leaves a small dot. Click the dot to bring them back.")),
+        switchEl(!!ov.minimised, async (v) => { await App.api.overlay_minimise(v); ov.minimised = v; draw(); })),
+      S ? details("More overlay options (what to show, layout, colours, hotkey)", ...more) : h("div", ...more),
+      h("div.mt", colourKey({ label: "What do the overlay colours mean?" })),
+      App.demo ? h("div.small.muted.mt", "Preview mode: ", h("a", { href: "overlay.html", target: "_blank" }, "open the overlay preview"), " to see and drag it.") : null);
   };
   draw();
   return box;
 }
 
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
 function appearanceCard(c) {
   const ui = c.ui || (c.ui = { theme: "dark", accent: "cyan", start_page: "home" });
-  const box = h("div.card");
+  const box = h("div.card#appearance");
   const draw = () => {
-    const modes = [["dark", "Dark", "#0b0e14", "#161b26"], ["light", "Light", "#f7f8fb", "#ffffff"], ["system", "Match Windows", "linear-gradient(90deg,#0b0e14 50%,#f7f8fb 50%)", ""]];
-    box.replaceChildren(cardHead("Appearance", "sliders"),
-      h("div.sub", "Changes apply instantly."),
-      h("div.small.muted", { style: { margin: "6px 0 8px" } }, "Mode"),
-      h("div.row.wrap", { style: { gap: "10px" } }, modes.map(([k, l, bg, fg]) => h("div.theme-mode" + (ui.theme === k ? ".on" : ""), { role: "button", tabIndex: 0, "aria-pressed": ui.theme === k,
-        onclick: () => { ui.theme = k; Theme.set({ theme: k }); draw(); } },
-        h("div.pv", { style: { background: bg } }, fg ? h("div", { style: { margin: "10px", height: "24px", borderRadius: "5px", background: fg, border: "1px solid rgba(128,128,128,.25)" } }) : null), h("b.small", l)))),
-      h("div.small.muted", { style: { margin: "16px 0 8px" } }, "Colour theme"),
-      h("div.row.wrap", { style: { gap: "12px" } }, Object.entries(THEME_ACCENTS).map(([k, l]) => {
-        const pal = { cyan: ["#36d6ff", "#8f6bff"], violet: ["#a37bff", "#ff5fb8"], emerald: ["#2fe0a0", "#2fb5ff"], amber: ["#ffb636", "#ff6b3d"], crimson: ["#ff4d6d", "#ff9a3d"], ocean: ["#4d8dff", "#36d6ff"], mono: ["#c7cedb", "#7d8799"] }[k];
-        return h("div", { style: { textAlign: "center" } }, h("div.theme-swatch" + (ui.accent === k ? ".on" : ""), { role: "button", tabIndex: 0, title: l, "aria-label": l + " colour theme", "aria-pressed": ui.accent === k,
-          style: { background: `linear-gradient(135deg, ${pal[0]}, ${pal[1]})` }, onclick: () => { ui.accent = k; Theme.set({ accent: k }); draw(); } }), h("div.small.muted", { style: { marginTop: "4px" } }, l));
+    const cur = Theme.cur;
+    box.replaceChildren(cardHead("Themes", "sliders"),
+      h("div.sub", "Pick a look. It changes straight away and is saved. Green, yellow and red stay easy to read in every theme."),
+      h("div.theme-grid", THEMES.map(([id, name]) => {
+        const pvTheme = id === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : id;
+        return h("button.theme-card" + (cur.theme === id ? ".on" : ""), { "aria-pressed": cur.theme === id, title: name,
+          onclick: () => { ui.theme = id; ui.accent = "theme"; Theme.set({ theme: id, accent: "theme" }); draw(); } },
+          h("div.theme-pv", { "data-theme": pvTheme }, h("div.side"), h("div.main", h("div.ln"), h("div.ln.m"),
+            h("div.dots", h("i", { style: { background: "var(--good)" } }), h("i", { style: { background: "var(--warn)" } }), h("i", { style: { background: "var(--bad)" } }),
+              h("i", { style: { background: "var(--accent)", marginLeft: "auto" } })))),
+          h("div.theme-name", { "data-theme": pvTheme }, name, cur.theme === id ? " ✓" : ""));
       })),
-      h("div.opt", { style: { marginTop: "14px" } }, h("div", h("div.t", "Open RigLab on"), h("div.d", "The page you see when the app starts.")),
+      h("div.small.muted", { style: { margin: "16px 0 8px" } }, "Highlight colour"),
+      h("div.row.wrap", { style: { gap: "12px" } }, Object.entries(THEME_ACCENTS).map(([k, l]) => {
+        const pal = { theme: ["var(--accent)", "var(--accent-2)"], cyan: ["#36d6ff", "#8f6bff"], violet: ["#a37bff", "#ff5fb8"], emerald: ["#2fe0a0", "#2fb5ff"], amber: ["#ffb636", "#ff6b3d"], crimson: ["#ff4d6d", "#ff9a3d"], ocean: ["#4d8dff", "#36d6ff"], mono: ["#c7cedb", "#7d8799"] }[k];
+        const on = (cur.accent || "theme") === k;
+        return h("div", { style: { textAlign: "center" } }, h("div.theme-swatch" + (on ? ".on" : ""), { role: "button", tabIndex: 0, title: l, "aria-label": l + " highlight colour", "aria-pressed": on,
+          style: { background: k === "theme" ? `linear-gradient(135deg, ${pal[0]} 50%, ${pal[1]} 50%)` : `linear-gradient(135deg, ${pal[0]}, ${pal[1]})` },
+          onclick: () => { ui.accent = k; Theme.set({ accent: k }); draw(); } }), h("div.small.muted", { style: { marginTop: "4px" } }, k === "theme" ? "Theme's own" : l));
+      })),
+      h("div.opt", { style: { marginTop: "14px" } }, h("div", h("div.t", "Text size"), h("div.d", "Makes all text, buttons and cards bigger or smaller. Also on the Aa button at the top.")),
+        h("div.seg", TEXT_SIZES.map(([v, l]) => h("button" + (+cur.text_scale === v ? ".on" : ""), { "aria-pressed": +cur.text_scale === v,
+          onclick: () => { ui.text_scale = v; Theme.set({ text_scale: v }); draw(); } }, l)))),
+      h("div.opt", h("div", h("div.t", "Open RigLab on"), h("div.d", "The page you see when the app starts.")),
         h("select", { onchange: e => { ui.start_page = e.target.value; App.api.ui_set({ start_page: e.target.value }); } },
-          [["home", "Home"], ["dashboard", "Dashboard"], ["last", "Last page I used"]].map(([v, l]) => h("option", { value: v, selected: (ui.start_page || "home") === v }, l)))));
+          [["home", "Home"], ["dashboard", isSimple() ? "PC Health" : "Dashboard"], ["last", "Last page I used"]].map(([v, l]) => h("option", { value: v, selected: (ui.start_page || "home") === v }, l)))));
   };
   draw();
   return box;
+}
+
+function helpCard() {
+  const box = h("div.card");
+  const draw = async () => {
+    let w = { on: false };
+    try { w = await App.api.weekly_state(); } catch { /* preview */ }
+    box.replaceChildren(cardHead("Help and regular checks", "info"),
+      h("div.opt", h("div", h("div.t", "Walkthrough"), h("div.d", "A short tour of the main screen.")),
+        h("button.btn.sm", { onclick: () => Tour.start() }, icon("play"), "Replay the walkthrough")),
+      h("div.opt", h("div", h("div.t", "Tips"), h("div.d", "The tips at the top of each page, including ones you chose not to show again.")),
+        h("button.btn.sm", { onclick: async () => { await Tips.reset(); toast("Tips will show again on each page"); } }, icon("refresh"), "Show tips again")),
+      switchRow("weekly.set", w.on, async (v) => { const r = await App.api.weekly_set(v); toast(r.msg, !r.ok); return !!r.ok; },
+        { always: true, desc: "Runs a quick check every Sunday at 7 pm and shows your score in a notification. Off unless you turn it on." }));
+  };
+  draw();
+  return box;
+}
+
+function creditsList() {
+  return details("Theme credits and licences", h("div.small", { style: { lineHeight: 1.7 } },
+    THEMES.filter(([, , c]) => /licen/i.test(c)).map(([, n, c]) => h("div", h("b", n), " - ", c)),
+    h("div.muted", "All theme palettes are used under the MIT licence, which allows use in commercial software with credit.")));
 }
 
 function viewCard() {
@@ -282,7 +350,8 @@ App.pages.settings = {
               sliderRow("Drives", 40, 80, a.drive_temp_max, 1, "°C", v => { a.drive_temp_max = v; })))),
         overlayCard(ov),
         h("div.card", cardHead("General", "gear"), ...general, details("Technical settings", ...technical)),
-        h("div.card", cardHead("About", "info"), ...about)));
+        h("div.card", cardHead("About", "info"), ...about, creditsList()),
+        helpCard()));
       return;
     }
     el.append(h("div.grid.g2.mt",
@@ -294,6 +363,7 @@ App.pages.settings = {
           sliderRow("Drives", 40, 80, a.drive_temp_max, 1, "°C", v => { a.drive_temp_max = v; }))),
       overlayCard(ov),
       h("div.card", cardHead("General", "gear"), ...general, ...technical),
-      h("div.card", cardHead("About", "info"), ...about)));
+      h("div.card", cardHead("About", "info"), ...about, creditsList()),
+      helpCard()));
   },
 };

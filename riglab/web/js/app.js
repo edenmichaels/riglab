@@ -17,6 +17,7 @@ const NAV = [
   ["home", "Home", "home", "Home"],
   ["label", "Monitor", null, "My PC"],
   ["dashboard", "Dashboard", "dash", "PC Health"],
+  ["explain", "PC summary", "chip", "My PC explained"],
   ["sensors", "Sensors", "pulse"],
   ["hardware", "Hardware", "chip"],
   ["crashes", "Crash Center", "alert", "Crashes & freezes"],
@@ -26,6 +27,7 @@ const NAV = [
   ["label", "Control"],
   ["overclock", "Overclocking", "bolt"],
   ["tweaks", "Tweaks", "sliders", "Performance Tweaks"],
+  ["storage", "Storage cleanup", "trash", "Free up space"],
   ["cooling", "Cooling", "fan", "Fans"],
   ["lighting", "Lighting", "light", "Lights"],
   ["benchmark", null, "bench", "Speed test"],
@@ -61,24 +63,59 @@ function drawTopbar() {
     h("div.seg.seg-sm", { role: "group", "aria-label": "Simple or Advanced view" },
       b("simple", "Simple", "Plain words, traffic lights, risky settings hidden"),
       b("advanced", "Advanced", "Every sensor, setting and technical detail")),
-    infoTip("Simple view uses plain words and hides risky settings. Advanced view shows every sensor, setting and technical detail. Nothing is removed in Simple view - switch any time."));
+    infoTip("Simple view uses plain words and hides risky settings. Advanced view shows every sensor, setting and technical detail. Nothing is removed in Simple view - switch any time."),
+    h("button.btn.sm.aa", { title: "Text size", "aria-label": "Text size", onclick: (e) => textSizeMenu(e.currentTarget) },
+      h("span", { style: { fontSize: "11px" } }, "A"), h("span", { style: { fontSize: "16px", fontWeight: 700 } }, "a")));
+}
+
+function textSizeMenu(anchor) {
+  const old = $(".aa-menu"); if (old) { old.remove(); return; }
+  const r = anchor.getBoundingClientRect(), z = +Theme.cur.text_scale || 1;
+  const menu = h("div.aa-menu", { role: "menu", style: { top: (r.bottom / z + 6) + "px", right: (document.documentElement.clientWidth - r.right) / z + "px" } },
+    h("div.small.muted", { style: { padding: "4px 8px 6px" } }, "Text size"),
+    TEXT_SIZES.map(([v, l]) => h("button" + (+Theme.cur.text_scale === v ? ".on" : ""), { role: "menuitemradio", "aria-checked": +Theme.cur.text_scale === v,
+      onclick: () => { menu.remove(); Theme.set({ text_scale: v }); } }, h("span", { style: { fontSize: (13 * v) + "px" } }, l), h("span.small.muted", Math.round(v * 100) + "%"))));
+  document.body.append(menu);
+  setTimeout(() => document.addEventListener("click", function off(e) { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener("click", off); } }), 0);
 }
 
 // ------------------------------------------------------------------ appearance
-const THEME_ACCENTS = { cyan: "Cyan", violet: "Violet", emerald: "Emerald", amber: "Amber", crimson: "Crimson", ocean: "Ocean", mono: "Graphite" };
+const THEME_ACCENTS = { theme: "Theme", cyan: "Cyan", violet: "Violet", emerald: "Emerald", amber: "Amber", crimson: "Crimson", ocean: "Ocean", mono: "Graphite" };
+/* [id, name, credit]. Colours live in app.css under [data-theme="id"]. Palettes are MIT-licensed. */
+const THEMES = [
+  ["dark", "Dark", "RigLab's own"],
+  ["light", "Light", "RigLab's own"],
+  ["system", "Match Windows", "Dark or Light, following Windows"],
+  ["dracula", "Dracula", "Dracula Theme by Zeno Rocha and contributors (MIT licence)"],
+  ["nord", "Nord", "Nord by Arctic Ice Studio and Sven Greb (MIT licence)"],
+  ["catppuccin", "Catppuccin Mocha", "Catppuccin by the Catppuccin organisation (MIT licence)"],
+  ["gruvbox", "Gruvbox", "Gruvbox by Pavel Pertsev (MIT licence)"],
+  ["solarized", "Solarized Dark", "Solarized by Ethan Schoonover (MIT licence)"],
+  ["tokyo", "Tokyo Night", "Tokyo Night by enkia (MIT licence)"],
+  ["onedark", "One Dark", "One Dark by GitHub / Atom (MIT licence)"],
+  ["contrast", "High Contrast", "RigLab's own, for easier reading"],
+];
+const TEXT_SIZES = [[0.8, "Small"], [1, "Normal"], [1.25, "Large"], [1.5, "Extra Large"]];
 const Theme = {
-  cur: { theme: "dark", accent: "cyan" },
+  cur: { theme: "dark", accent: "cyan", text_scale: 1 },
+  mode() { return this.cur.theme === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : this.cur.theme; },
   apply(t) {
     this.cur = Object.assign({}, this.cur, t);
-    const mode = this.cur.theme === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : this.cur.theme;
-    document.documentElement.dataset.theme = mode;
-    document.documentElement.dataset.accent = this.cur.accent;
+    if (!THEMES.some(([id]) => id === this.cur.theme)) this.cur.theme = "dark";
+    const d = document.documentElement;
+    d.dataset.theme = this.mode();
+    d.dataset.accent = this.cur.accent || "theme";
+    const z = TEXT_SIZES.some(([v]) => v === +this.cur.text_scale) ? +this.cur.text_scale : 1;
+    this.cur.text_scale = z;
+    d.style.setProperty("--zoom", z);
+    document.body && (document.body.style.zoom = z);
     try { localStorage.setItem("riglab.theme", JSON.stringify(this.cur)); } catch { /* ignore */ }
   },
   async set(t) {
     this.apply(t);
     try { await App.api.ui_set(t); } catch { /* preview mode */ }
-    if (App.page && App.pageId) go(App.pageId);         // redraw canvases with the new colours
+    if (App.page && App.pageId) go(App.pageId);         // redraw canvases with the new colours and size
+    drawTopbar();
   },
 };
 matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { if (Theme.cur.theme === "system") Theme.apply({}); });
@@ -110,7 +147,8 @@ function buildShell() {
   drawTopbar();
 }
 
-function go(id) {
+/* go(page, {focus: "anchor"}) - opts.focus scrolls to and highlights an element with data-anchor="anchor". */
+function go(id, opts = {}) {
   if (App.page && App.page.leave) App.page.leave();
   const P = App.pages[id];
   if (!P) return;
@@ -123,8 +161,14 @@ function go(id) {
   App.page = P;
   App.pageId = id;
   try { localStorage.setItem("riglab.page", id); } catch { /* storage may be off */ }
-  P.render(el);
+  const r = P.render(el);
+  const tip = typeof Tips !== "undefined" ? Tips.banner(id) : null;
+  if (tip) el.prepend(tip);
   if (App.snap && P.tick) P.tick(App.snap);
+  if (opts.focus) Promise.resolve(r).then(() => setTimeout(() => {
+    const a = $(`[data-anchor="${opts.focus}"]`, el);
+    if (a) { a.scrollIntoView({ block: "start", behavior: "smooth" }); a.classList.add("flash"); setTimeout(() => a.classList.remove("flash"), 2200); }
+  }, 350));
 }
 
 async function loop() {
@@ -160,7 +204,7 @@ async function start() {
   else { App.api = new DemoApi(); App.demo = true; }
   App.info = await App.api.info();
   const ui = App.info.ui || {};
-  Theme.apply({ theme: ui.theme || Theme.cur.theme, accent: ui.accent || Theme.cur.accent });
+  Theme.apply({ theme: ui.theme || Theme.cur.theme, accent: ui.accent || Theme.cur.accent, text_scale: ui.text_scale || 1 });
   App.view = (App.info.view || ui.view) === "advanced" ? "advanced" : "simple";
   buildShell();
   $("#ver").textContent = "v" + App.info.version;
@@ -169,6 +213,7 @@ async function start() {
   if (start === "last") { try { first = localStorage.getItem("riglab.page") || "home"; } catch { first = "home"; } }
   App.snap = await App.api.snapshot();
   go(App.pages[first] ? first : "home");
+  if (!ui.tour_done) setTimeout(() => Tour.start(), 900);      // first launch: show the walkthrough once
   loop();
   refreshHealth();
   setInterval(refreshHealth, 15000);

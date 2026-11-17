@@ -35,6 +35,8 @@ def make_icon(size: int = 64):
 class App:
     def __init__(self):
         self.config = cfg = Config()
+        from .core import overlay as _ov
+        cfg.data["overlay"] = _ov.migrate(cfg.data.get("overlay") or {})     # 3.7-3.9 overlay settings -> stats/presets
         self.hub = SensorHub(cfg["poll_interval_ms"] / 1000, cfg["history_seconds"])
         self.hub.liquid.enabled = cfg["liquidctl"].get("enabled", True)
         self.hub.liquid.excluded = set(cfg["liquidctl"].get("exclude", []))
@@ -48,7 +50,10 @@ class App:
         self.window = None
         self.overlay = None
         self._ov_size = None          # size the overlay page asked for
-        self._ov_edit = False         # move mode (clicks don't pass through)
+        self._ov_edit = False         # unlocked (clicks don't pass through, can be dragged)
+        self._ov_hidden = False       # hidden with the hotkey (not saved)
+        self._ov_drag = None          # DragTracker while unlocked
+        self._hotkey_tid = None       # thread id of the hotkey listener
         self.gpu_win = None
         self.gpu_params = {"mode": "bench", "seconds": 30}
         self.gpu_result = None
@@ -59,7 +64,8 @@ class App:
     def run(self):
         self.window = webview.create_window(
             APP_NAME, str(WEB / "index.html"), js_api=self.api, width=1380, height=880, min_size=(1100, 700),
-            background_color="#0a0c11", text_select=False, hidden=self.config["start_minimized"] or "--minimized" in sys.argv)
+            background_color="#0a0c11", text_select=False,
+            hidden=self.config["start_minimized"] or "--minimized" in sys.argv or "--weekly-check" in sys.argv)
         self.window.events.closing += self._on_closing
         self.overlay = webview.create_window(
             "RigLab Overlay", str(WEB / "overlay.html"), js_api=self.api,
@@ -68,7 +74,7 @@ class App:
         self.overlay.events.shown += self._make_clickthrough
         self._start_tray()
         from .core import instance
-        instance.serve(self.quit)
+        instance.serve(self.quit, self.weekly_check)
         webview.start(self._after_start, private_mode=False, storage_path=str((app_dir() / "webview") if getattr(sys, "frozen", False) else (project_root() / ".webview")),
                       debug="--debug" in sys.argv)
         self.shutdown()
@@ -76,8 +82,25 @@ class App:
     def _after_start(self):
         if self.config["overlay"]["enabled"]:
             self.apply_overlay()
+        self.overlay_hotkey()
         threading.Thread(target=self._lighting_start, name="Lighting", daemon=True).start()
         threading.Thread(target=self._startup_checks, name="StartupChecks", daemon=True).start()
+        if "--weekly-check" in sys.argv:          # started by Task Scheduler only to run the check
+            threading.Thread(target=lambda: self.weekly_check(quit_after=True), name="WeeklyCheck", daemon=True).start()
+
+    def weekly_check(self, quit_after: bool = False):
+        """The weekly scheduled quick check: run it, then show the score as a Windows notification."""
+        if quit_after:
+            time.sleep(25)                       # let the sensors warm up first
+        try:
+            r = self.api.health_quick()
+            if r and r.get("summary"):
+                self.notify("RigLab weekly check", r["summary"])
+        except Exception:  # noqa: BLE001
+            log.exception("weekly check")
+        if quit_after:
+            time.sleep(8)                        # leave time for the notification
+            self.quit()
 
     def _startup_checks(self):
         """Did the PC crash during a test or since last time? Did BIOS settings change?"""
@@ -185,8 +208,8 @@ class App:
             pystray.MenuItem("Open RigLab", lambda: self.show(), default=True),
             pystray.MenuItem("Overlay", lambda: self.toggle_overlay(),
                              checked=lambda _: self.config["overlay"]["enabled"]),
-            pystray.MenuItem("Move overlay", lambda: self.overlay_edit(not self._ov_edit),
-                             checked=lambda _: self._ov_edit),
+            pystray.MenuItem("Unlock overlay (drag it)", lambda: self.overlay_lock(not self.config["overlay"].get("locked", True)),
+                             checked=lambda _: not self.config["overlay"].get("locked", True)),
             pystray.MenuItem("Quit", lambda: self.quit()))
         self.tray = pystray.Icon("RigLab", img, APP_NAME, menu)
         self.tray.run_detached()
@@ -211,63 +234,152 @@ class App:
         if not self.overlay:
             return
         o = self.config["overlay"]
-        if o["enabled"]:
+        if o["enabled"] and not self._ov_hidden:
             try:
-                w, h = self._ov_size or ov.guess_size(o)
+                w, h = (ov.DOT, ov.DOT) if o.get("minimised") else (self._ov_size or ov.guess_size(o))
                 self.overlay.resize(w, h)
                 x, y = ov.place(o, w, h, self._screens())
                 self.overlay.move(x, y)
             except Exception:  # noqa: BLE001
                 pass
             self.overlay.show()
+            self._set_clickthrough(ov.clickthrough(o))
         else:
-            self._ov_edit = False
             self.overlay.hide()
         self._sync_overlay_fps()
 
     def overlay_fit(self, w: int, h: int):
         """The overlay page reports the size its content needs; resize, keeping it anchored to its corner/spot."""
         from .core import overlay as ov
-        w, h = max(40, min(800, int(w))), max(24, min(600, int(h)))
+        o = self.config["overlay"]
+        if o.get("minimised"):
+            return
+        w, h = max(40, min(1600, int(w))), max(24, min(900, int(h)))
         if self._ov_size == (w, h) or not self.overlay:
             return
         self._ov_size = (w, h)
-        o = self.config["overlay"]
         try:
             self.overlay.resize(w, h)
-            if not self._ov_edit:
-                self.overlay.move(*ov.place(o, w, h, self._screens()))
+            self.overlay.move(*ov.place(o, w, h, self._screens()))
         except Exception:  # noqa: BLE001
             pass
 
-    def overlay_edit(self, on: bool) -> dict:
-        """Move mode: the overlay stops letting clicks through so it can be dragged; Done saves where it is."""
+    def overlay_lock(self, locked: bool) -> dict:
+        """Locked: clicks pass straight through to the game. Unlocked: drag it anywhere, and the minimise button works."""
         o = self.config["overlay"]
-        if on:
-            if not o["enabled"]:
-                o["enabled"] = True
-                self.config.save()
-                self.apply_overlay()
-            self._ov_edit = True
-            self._set_clickthrough(False)
-        else:
-            pos = self._overlay_pos()
-            self._ov_edit = False
-            self._set_clickthrough(True)
-            if pos:
-                from .core import overlay as ov
-                w, h = self._ov_size or ov.guess_size(o)
-                o["x"], o["y"] = ov.clamp_position(pos[0], pos[1], w, h, self._screens())
-                self.config.save()
-                self.overlay.move(o["x"], o["y"])
-        return {"edit": self._ov_edit, "x": o.get("x"), "y": o.get("y")}
+        if not locked and not o["enabled"]:
+            o["enabled"] = True
+            self.apply_overlay()
+        if locked:
+            self._save_overlay_pos()                       # keep wherever it was left
+        o["locked"] = bool(locked)
+        self._ov_edit = not o["locked"]
+        from .core import overlay as ov
+        self._ov_drag = None if o["locked"] else ov.DragTracker(self._overlay_pos())
+        self.config.save()
+        self._set_clickthrough(ov.clickthrough(o))
+        return {"locked": o["locked"], "x": o.get("x"), "y": o.get("y")}
+
+    def overlay_edit(self, on: bool) -> dict:
+        """Older name for unlocking (Settings' Move overlay button and the tray used it)."""
+        r = self.overlay_lock(not on)
+        return {"edit": not r["locked"], "x": r["x"], "y": r["y"]}
+
+    def overlay_minimise(self, on: bool) -> dict:
+        """Shrink to a small dot (clickable) or bring it back, in the same spot."""
+        from .core import overlay as ov
+        o = self.config["overlay"]
+        if bool(on) == bool(o.get("minimised")):
+            return {"minimised": o["minimised"]}
+        self._save_overlay_pos()
+        o["minimised"] = bool(on)
+        self.config.save()
+        try:
+            w, h = (ov.DOT, ov.DOT) if o["minimised"] else (self._ov_size or ov.guess_size(o))
+            self.overlay.resize(w, h)
+            self.overlay.move(*ov.place(o, w, h, self._screens()))
+        except Exception:  # noqa: BLE001
+            pass
+        self._set_clickthrough(ov.clickthrough(o))
+        return {"minimised": o["minimised"]}
+
+    def overlay_track(self) -> dict:
+        """Called by the overlay page every half second while unlocked. Windows does the dragging; when it stops
+        moving, keep it inside the screen (or snap it to a corner) and save the spot."""
+        from .core import overlay as ov
+        o = self.config["overlay"]
+        if o.get("locked", True):
+            return {"state": None}
+        if self._ov_drag is None:
+            self._ov_drag = ov.DragTracker(self._overlay_pos())
+        st = self._ov_drag.feed(self._overlay_pos())
+        if st == "settled":
+            self._save_overlay_pos(drop=True)
+        return {"state": st, "x": o.get("x"), "y": o.get("y")}
+
+    def _save_overlay_pos(self, drop: bool = False):
+        from .core import overlay as ov
+        o = self.config["overlay"]
+        pos = self._overlay_pos()
+        if not pos or not self.overlay:
+            return
+        w, h = (ov.DOT, ov.DOT) if o.get("minimised") else (self._ov_size or ov.guess_size(o))
+        x, y = ov.drop_position(o, pos[0], pos[1], w, h, self._screens()) if drop else ov.clamp_position(pos[0], pos[1], w, h, self._screens())
+        if (x, y) != tuple(pos):
+            try:
+                self.overlay.move(x, y)
+            except Exception:  # noqa: BLE001
+                pass
+        if (o.get("x"), o.get("y")) != (x, y):
+            o["x"], o["y"] = x, y
+            self.config.save()
+        if self._ov_drag:
+            self._ov_drag.last = (x, y)
 
     def overlay_corner(self, corner: str):
-        """Snap back to a corner (forgets the dragged spot)."""
+        """Snap to a corner (forgets the dragged spot)."""
         o = self.config["overlay"]
         o["corner"], o["x"], o["y"] = corner, None, None
         self.config.save()
         self.apply_overlay()
+
+    def overlay_toggle_hidden(self):
+        """The show/hide hotkey: hides it until pressed again (the setting itself doesn't change)."""
+        self._ov_hidden = not self._ov_hidden
+        self.apply_overlay()
+
+    def overlay_hotkey(self):
+        """(Re)register the show/hide hotkey on its own thread (Windows sends WM_HOTKEY to the thread that registered it)."""
+        from .core import overlay as ov
+        if sys.platform != "win32":
+            return False
+        import ctypes
+        from ctypes import wintypes
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        if self._hotkey_tid:
+            u.PostThreadMessageW(self._hotkey_tid, 0x0012, 0, 0)    # WM_QUIT stops the old listener
+            self._hotkey_tid = None
+        parsed = ov.parse_hotkey(self.config["overlay"].get("hotkey", ""))
+        if not parsed:
+            return False
+        ok = threading.Event()
+        result = {"ok": False}
+
+        def listen():
+            self._hotkey_tid = k.GetCurrentThreadId()
+            result["ok"] = bool(u.RegisterHotKey(None, 1, parsed[0], parsed[1]))
+            ok.set()
+            if not result["ok"]:
+                log.warning("overlay hotkey %s is already used by another app", self.config["overlay"].get("hotkey"))
+                return
+            msg = wintypes.MSG()
+            while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == 0x0312:                           # WM_HOTKEY
+                    self.overlay_toggle_hidden()
+            u.UnregisterHotKey(None, 1)
+        threading.Thread(target=listen, name="OverlayHotkey", daemon=True).start()
+        ok.wait(2)
+        return result["ok"]
 
     def _overlay_hwnd(self):
         if sys.platform != "win32":
@@ -319,8 +431,9 @@ class App:
         self.apply_overlay()
 
     def _make_clickthrough(self):
-        """Let mouse clicks pass through the overlay to the game underneath."""
-        self._set_clickthrough(not self._ov_edit)
+        """Let mouse clicks pass through the overlay to the game underneath (when locked)."""
+        from .core import overlay as ov
+        self._set_clickthrough(ov.clickthrough(self.config["overlay"]))
 
     def _set_clickthrough(self, on: bool):
         hwnd = self._overlay_hwnd()

@@ -1,8 +1,8 @@
 """PC health score (0-100) for the dial on Home and PC Health, plus the saved results.
 
 The quick check scores what RigLab can see quickly: temperatures, memory, free space, fans, drive health
-and recent crashes. Part C adds the full Windows checks to the same items list, so the dial and the score
-rules stay the same. Rules and wording come from web/js/explain_data.js ("score" and "lights").
+and recent crashes. The full check (core/healthcheck.py) adds the Windows checks to the same items list, so the
+dial and the score rules stay the same. Rules and wording come from web/js/explain_data.js ("score" and "lights").
 """
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ def result(items, kind="quick", now=None) -> dict:
 
 
 class HealthStore:
-    """Last result plus a short score history (for the chart in Part C). Kept in health.json, apart from settings."""
+    """Last result plus a short score history (for the score-over-time chart). Kept in health.json, apart from settings."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or app_dir() / "health.json"
@@ -126,3 +126,27 @@ class HealthStore:
             except OSError:
                 pass
             return res
+
+
+WORDS = {"good": "Good", "warn": "Worth checking", "bad": "Needs fixing", "none": "Not checked / skipped"}
+
+
+def report_text(res: dict, version: str = "") -> str:
+    """Plain text report for Save report (also what the PDF prints)."""
+    when = time.strftime("%A %d %B %Y, %I:%M %p", time.localtime(res.get("time") or time.time()))
+    kind = "Full check" if res.get("kind") == "full" else "Quick check"
+    lines = [f"RigLab {version} - PC health report".strip(), "=" * 44, f"{kind} - {when}", "",
+             f"Health score: {res.get('score') if res.get('score') is not None else '-'} / 100",
+             res.get("summary", ""), ""]
+    order = {"bad": 0, "warn": 1, "good": 2, "none": 3}
+    for it in sorted(res.get("items") or [], key=lambda i: order.get(i.get("state"), 4)):
+        lines.append(f"[{WORDS.get(it.get('state'), '?')}] {it.get('title')}")
+        lines.append(f"    {it.get('say', '')}")
+        for ln in it.get("lines") or []:
+            lines.append(f"      - {ln}")
+        if it.get("details"):
+            lines += ["      " + d for d in str(it["details"]).splitlines()[:25]]
+        lines.append("")
+    lines += ["Colours: Good = nothing to do. Worth checking = not urgent. Needs fixing = take a look soon.",
+              "Not checked / skipped items don't change the score."]
+    return "\n".join(lines)
