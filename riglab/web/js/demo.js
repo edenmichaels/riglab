@@ -89,7 +89,7 @@ class DemoApi {
     return v.toFixed(1) + " " + d.unit;
   }
   // ------------------------------------------------------------ api
-  async info() { const ui = this.uiCfg || {}; return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.8.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
+  async info() { const ui = this.uiCfg || {}; return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.9.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
   status() { return { "LibreHardwareMonitor": "active", "liquidctl (fan hubs / AIOs)": "active", "NVIDIA NVML": "active", psutil: "active" }; }
   async snapshot() {
     this.sample(0);
@@ -353,6 +353,7 @@ class DemoApi {
       { id: "hags", name: "Hardware-accelerated GPU scheduling", desc: "Lets the GPU manage its own memory scheduling. Needed for DLSS Frame Generation. Recommended ON.", on: true, admin: true, reboot: true, cat: "Gaming" },
       { id: "game_dvr", name: "Xbox Game Bar background recording", desc: "Constantly records gameplay so you can save clips. Costs a few FPS.", on: false, admin: false, reboot: false, cat: "Gaming" },
       { id: "mouse_accel", name: "Mouse acceleration", desc: "Cursor moves further when you move the mouse fast. Most FPS players turn this OFF.", on: false, admin: false, reboot: false, cat: "Input" },
+      { id: "notifications", name: "Notification banners", desc: "Windows and app pop-up notifications. OFF stops banners appearing over games, streams and work.", on: true, admin: false, reboot: false, cat: "Visual" },
       { id: "transparency", name: "Transparency effects", desc: "Windows blur/glass effects.", on: true, admin: false, reboot: false, cat: "Visual" },
       { id: "net_throttle", name: "Multimedia network throttling", desc: "Windows limits network traffic while media plays. OFF can help online games.", on: true, admin: true, reboot: true, cat: "Network" }],
       plans: [{ guid: "a", name: "Balanced", active: true }, { guid: "b", name: "High performance", active: false }, { guid: "c", name: "Power saver", active: false }],
@@ -387,6 +388,59 @@ class DemoApi {
     const e = { id: c.length + 1, time: Date.now() / 1000, kind, title, before, after, risk, source, can_undo: undo && source !== "undo", undone_by: null, ok: true, detail: "" };
     c.push(e); return e;
   }
+  // ---------------------------------------------------------------- PC health dial (preview)
+  async health_last() { return { last: this.hlast || null, history: this.hhist || [] }; }
+  async health_quick() {
+    await new Promise(r => setTimeout(r, 2500));
+    const L = window.EXPLAIN_DATA.lights, say = (k, st) => L[k].say[st];
+    const it = (id, st, extra = {}) => ({ id, title: L[id].name, state: st, say: say(id, st), page: null, fix: null, ...extra });
+    const items = [it("cpu_temp", "good"), it("gpu_temp", "good"), it("ram_load", "good"),
+      it("disk_free", "warn", { say: say("disk_free", "warn") + " (48 GB free)", page: "tweaks", fix: "Free up space" }),
+      it("fans", "good"), it("crashes", "warn", { page: "crashes", fix: "Find out why" }), it("drives", "good")];
+    const score = 100 - 2 * 8;
+    const t = Date.now() / 1000;
+    this.hlast = { time: t, kind: "quick", score, state: score >= 80 ? "good" : score >= 50 ? "warn" : "bad",
+      summary: `${score}% \u2014 Your PC is in good health. A few things need checking.`, items };
+    (this.hhist ||= []).push({ time: t, score });
+    return this.hlast;
+  }
+  // ---------------------------------------------------------------- presets (preview): same rules as core/presets.py
+  _pcur() { return (this.pcur ||= { plan: "balanced", fans: "Balanced", tweaks: { game_mode: true, game_dvr: true, notifications: true, transparency: true } }); }
+  async preset_state() {
+    const P = window.EXPLAIN_DATA.presets, order = ["gaming", "balanced", "quiet", "power_saver", "streaming", "work"];
+    const cards = order.map(id => ({ id, name: P[id].name, desc: P[id].desc, icon: P[id].icon, default: !!P[id].default }));
+    const match = (id) => !this._pplan(id).changes.length;
+    const pref = [this.plast, "balanced", ...order].filter(Boolean);
+    return { cards, active: pref.find(id => P[id] && match(id)) || null, last: this.plast || null };
+  }
+  _pplan(id) {
+    const D = window.EXPLAIN_DATA, d = D.presets[id], c = this._pcur(), w = d.set, A = D.actions;
+    const changes = [], already = [];
+    const plainPlan = (k) => D.plans[k].name;
+    if (w.plan) (c.plan === w.plan ? already.push(`Power plan is already ${plainPlan(w.plan)}.`)
+      : changes.push({ kind: "plan", key: w.plan, risk: "Low", text: `Switches to the ${plainPlan(w.plan)} power plan.`, tech: `powercfg /setactive <${D.plans[w.plan].tech} GUID>  (now: ${D.plans[c.plan].tech})` }));
+    if (w.fans) (c.fans === w.fans ? already.push(`Fans are already set to ${D.fan_presets[w.fans]}.`)
+      : changes.push({ kind: "fans", key: w.fans, risk: "Low", text: `Sets all 5 fans to ${D.fan_presets[w.fans]}.`, tech: `Fan curve preset '${w.fans}' on: CPU Fan, Chassis Fan #1, Fan 1, Fan 2, Fan 3. Safety floors stay on.` }));
+    for (const [k, on] of Object.entries(w.tweaks || {})) {
+      const lab = A["tweak." + k].label;
+      if (c.tweaks[k] === on) already.push(`\u201c${lab}\u201d is already ${on ? "on" : "off"}.`);
+      else changes.push({ kind: "tweak", key: k, to: on, risk: A["tweak." + k].risk, text: `Turns ${on ? "on" : "off"} \u201c${lab}\u201d.`, tech: `Tweak '${k}' -> ${on ? "on" : "off"} (now: ${c.tweaks[k] ? "on" : "off"})` });
+    }
+    const rank = ["None", "Low", "Medium", "High"];
+    const risk = changes.reduce((a, x) => rank.indexOf(x.risk) > rank.indexOf(a) ? x.risk : a, "None");
+    return { id, name: d.name, desc: d.desc, icon: d.icon, changes, already, skipped: [], notice: d.notice, risk,
+      undo: "Yes - one click in Change history puts every setting back the way it was.", nothing: !changes.length };
+  }
+  async preset_preview(id) { await new Promise(r => setTimeout(r, 300)); return this._pplan(id); }
+  async preset_apply(id) {
+    const p = this._pplan(id), c = this._pcur();
+    this.plast = id;
+    if (p.nothing) return { ok: true, changed: 0, msg: `Your PC is already set up for ${p.name}` };
+    const before = JSON.parse(JSON.stringify(c));
+    for (const x of p.changes) { if (x.kind === "plan") c.plan = x.key; else if (x.kind === "fans") c.fans = x.key; else c.tweaks[x.key] = x.to; }
+    this._log("preset", `Applied the ${p.name} preset`, before, { preset: id }, true, "you", p.risk).detail = p.changes.map(x => x.text).join(" ");
+    return { ok: true, changed: p.changes.length, msg: `${p.name} preset applied. You can undo it in Change history.` };
+  }
   async pc_status() { return { disk_free_pct: 23.4, disk_free: 220e9, crashes: this.crashScanned ? 1 : null }; }
   async changes_list() {
     if (!this.changes) {   // a little history so the page isn't empty in preview
@@ -401,6 +455,7 @@ class DemoApi {
   async change_undo(id) {
     const e = (this.changes || []).find(x => x.id === +id);
     if (!e || !e.can_undo || e.undone_by) return { ok: false, msg: "This change can't be undone (or was already undone)" };
+    if (e.kind === "preset") this.pcur = JSON.parse(JSON.stringify(e.before));
     const n = this._log(e.kind, "Undid: " + e.title, e.after, e.before, false, "undo", e.risk); e.undone_by = n.id;
     return { ok: true, msg: "Put back the way it was" };
   }

@@ -11,7 +11,12 @@ App.pages.history = {
       : "Every change RigLab applied, with what it was before. Undo restores the previous value and is logged too.",
       h("button.btn", { onclick: () => this.load() }, icon("refresh"), "Refresh")));
     this.box = h("div.card", h("div.empty", h("div.spinner")));
-    el.append(this.box, h("div.small.muted.mt", "Some things can't be undone - like deleted temporary files or a restore point. They're listed so you can see what happened."));
+    const L = (state, txt) => h("div.key-row", dot(state), txt);
+    el.append(h("details.key", { style: { margin: "-8px 0 12px" } }, h("summary", "What do the colours mean?"), h("div.key-body",
+      L("good", "Done - a None or Low risk change"), L("warn", "Done - a Medium or High risk change (RigLab checked for a restore point first)"),
+      L("bad", "Didn't work - nothing was changed, or only part of it"), L("none", "An undo, putting something back"),
+      h("div.key-sep"), h("div.key-row", h("span.pill", "Undone"), "This change has already been undone"))));
+    el.append(this.box, h("div.small.muted.mt", "Some things can't be undone, like deleted temporary files or a restore point. They're still listed so you can see what happened."));
     this.load();
   },
   async load() {

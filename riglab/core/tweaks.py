@@ -116,6 +116,9 @@ def enable_restore() -> tuple[bool, str]:
 
 # ---------------------------------------------------------------- power plans
 ULTIMATE_GUID = "e9a42b02-d5df-448d-aa00-03f14749eb61"
+# Windows' built-in plans have the same GUID on every PC (their names are translated, so match by GUID)
+PLAN_GUIDS = {"high": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "balanced": "381b4222-f694-41f0-9685-ff5bb260df2e",
+              "saver": "a1841308-3542-4f79-b6ab-2f2e9fdb7f9d", "ultimate": ULTIMATE_GUID}
 
 
 def power_plans() -> list[dict]:
@@ -221,6 +224,17 @@ def _netthrottle_set(on: bool):
     reg_set(winreg.HKEY_LOCAL_MACHINE, SYSPROF, "NetworkThrottlingIndex", 10 if on else 0xFFFFFFFF)
 
 
+TOASTS = r"Software\Microsoft\Windows\CurrentVersion\PushNotifications"
+
+
+def _toasts_get():
+    return reg_get(winreg.HKEY_CURRENT_USER, TOASTS, "ToastEnabled", 1) == 1
+
+
+def _toasts_set(on: bool):
+    reg_set(winreg.HKEY_CURRENT_USER, TOASTS, "ToastEnabled", 1 if on else 0)
+
+
 def all_tweaks() -> list[Tweak]:
     if not IS_WIN:
         return []
@@ -235,6 +249,9 @@ def all_tweaks() -> list[Tweak]:
         Tweak("mouse_accel", "Mouse acceleration (Enhance pointer precision)", "Makes the cursor move further when "
               "you move the mouse fast. Most FPS players turn this OFF for consistent aim.",
               _mouse_accel_get, _mouse_accel_set, category="Input"),
+        Tweak("notifications", "Notification banners", "Windows and app pop-up notifications (the switch at the top of "
+              "Settings > System > Notifications). OFF stops banners appearing over games, streams and work.",
+              _toasts_get, _toasts_set, category="Visual"),
         Tweak("transparency", "Transparency effects", "Windows blur/glass effects. Turning OFF frees a little GPU "
               "on low-end systems.", _transparency_get, _transparency_set, category="Visual"),
         Tweak("net_throttle", "Multimedia network throttling", "Windows limits non-media network traffic while "

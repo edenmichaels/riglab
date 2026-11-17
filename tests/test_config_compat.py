@@ -30,3 +30,10 @@ def test_370_settings_open_in_simple_view(tmp_path):
     assert c["ui"]["view"] == "simple"                   # new default
     assert c["ui"]["theme"] == "light" and c["ui"]["accent"] == "violet" and c["ui"]["start_page"] == "last"
     assert c["alerts"]["cpu_temp_max"] == 85.0 and c["alerts"]["gpu_temp_max"] == DEFAULTS["alerts"]["gpu_temp_max"]
+
+
+def test_380_settings_get_no_preset(tmp_path):
+    f = tmp_path / "settings.json"
+    f.write_text(json.dumps({"ui": {"view": "advanced", "theme": "dark"}}), encoding="utf-8")
+    c = Config(f)
+    assert c["ui"]["view"] == "advanced" and c["ui"]["preset"] is None

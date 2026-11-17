@@ -1,5 +1,17 @@
-RigLab 3.8.0
+RigLab 3.9.0
 ============
+
+NEW IN 3.9.0
+  - Simple / Advanced switch in the top bar of every page. It switches instantly and remembers your choice.
+  - Home: a big health dial (0-100) in the centre. Click it to open PC Health. "Run a quick check" scores
+    temperatures, memory, free space, fans, drive health and crashes in the last 30 days.
+  - Home presets: Gaming, Balanced, Quiet, Power Saver, Streaming / Creating, Work / Focus. Clicking one
+    shows exactly what will change first; nothing happens until you press Apply. One Undo puts it all back.
+  - PC Health page (was "How my PC is doing"): the same dial with a report card underneath.
+  - "What do the colours mean?" keys on every page that uses coloured dots or risk levels.
+  - Renamed: "Make it better" -> Tools, "Speed-ups" -> Performance Tweaks.
+  - New Windows switch: pop-up notifications on/off (used by the Gaming, Streaming and Work presets).
+  - Clearer wording throughout Simple view.
 
 NEW IN 3.8.0 - Simple by default
   - Simple view (the new default): plain words everywhere, and green / yellow / red lights for every
@@ -26,7 +38,7 @@ INSTALL (once)
   2. Open the extracted folder and double-click  "Build RigLab Installer.bat".
      The first build takes 5-10 minutes; later builds take 1-2.
      It sets up everything it needs by itself and keeps it in %LOCALAPPDATA%\RigLab-build.
-  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.8.0.exe.
+  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.9.0.exe.
      Double-click it: RigLab installs to Program Files with Start-menu and desktop shortcuts.
 
 UPDATE

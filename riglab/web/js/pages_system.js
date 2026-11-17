@@ -10,11 +10,11 @@ const PLAN_PLAIN = { "power saver": ["Save power", "Slower, cooler and quieter. 
 App.pages.tweaks = {
   async render(el) {
     this.el = el;
-    el.append(plainHead("Speed-ups", "Simple changes that make your PC feel faster. Every change can be undone in Change history.",
+    el.append(plainHead("Performance Tweaks", "Simple changes that make your PC feel faster. You can undo every change in Change history.",
       "Tweaks", "Windows and gaming tweaks. Every change is logged in Change history and can be undone. Medium-risk changes make a restore point first.",
       actionBtn("restore.create", () => this.restore(), { icon: "undo", label: isSimple() ? "Make a safety backup" : "Create restore point" })));
     this.body = h("div", h("div.empty", h("div.spinner")));
-    el.append(this.body);
+    el.append(h("div", { style: { margin: "-8px 0 12px" } }, riskKey()), this.body);
     const st = await App.api.tweaks_state();
     this.draw(st);
   },
@@ -59,7 +59,7 @@ App.pages.tweaks = {
       shownCount += rows.length;
       tcard.append(h("div.nav-label", { style: { padding: "10px 0 0" } }, S ? ({ Gaming: "Games", Input: "Mouse", Visual: "Looks", Network: "Internet" }[cat] || cat) : cat), ...rows);
     }
-    if (S && st.tweaks.length > shownCount) tcard.append(h("div.small.muted", { style: { paddingTop: "10px" } }, "More settings are in Advanced view (Settings → How much detail?)."));
+    if (S && st.tweaks.length > shownCount) tcard.append(h("div.small.muted", { style: { paddingTop: "10px" } }, "More settings are in Advanced view. Use the Simple / Advanced switch at the top of the window."));
     parts.push(tcard);
 
     if (!S) {
