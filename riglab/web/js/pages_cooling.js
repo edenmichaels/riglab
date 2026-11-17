@@ -1,21 +1,54 @@
 /* Cooling: fan list + draggable curve editor */
 "use strict";
 
+// Simple view names for the presets in core/fans.py (same curves; "Full speed" stays in Advanced)
+const FAN_SIMPLE = [["Silent", "Quiet", "Less noise. Parts run a bit warmer."], ["Balanced", "Balanced", "A good mix of quiet and cool. Recommended."],
+  ["Performance", "Cool", "Parts stay colder. Fans are louder."]];
+
 App.pages.cooling = {
   sel: null, points: null, source: null, pump: false,
   async render(el) {
     this.el = el;
-    el.append(pageHead("Cooling", "Custom fan and pump curves. Drag the points on the graph to shape how fast fans spin as things heat up."));
+    const S = isSimple();
+    el.append(plainHead("Fans", "Make your PC quieter or cooler with one click. RigLab's safety rules always stay on.",
+      "Cooling", "Custom fan and pump curves. Drag the points on the graph to shape how fast fans spin as things heat up."));
     this.top = h("div");
     el.append(this.top);
     this.list = h("div.fan-list");
     this.editor = h("div.card");
-    el.append(h("div.grid", { style: { gridTemplateColumns: "400px minmax(0,1fr)", alignItems: "start" } },
-      h("div.card", cardHead("Fans & pumps", "fan"), this.list), this.editor));
-    el.append(h("div.card.mt", cardHead("Safety rules (always on)", "info"), h("div.small.muted", { style: { lineHeight: "1.8" } },
-      "• Fans never go below 20%, pumps never below 60%.  • If the temperature sensor disappears or passes 90°C, the fan goes to 100%.  ",
-      "• When RigLab closes, motherboard fans go back to BIOS control and USB hubs go back to their own defaults.")));
+    const editorGrid = h("div.grid", { style: { gridTemplateColumns: "400px minmax(0,1fr)", alignItems: "start" } },
+      h("div.card", cardHead("Fans & pumps", "fan"), this.list), this.editor);
+    const safety = h("div.card.mt", cardHead(S ? "Safety rules (always on)" : "Safety rules (always on)", "info"), h("div.small.muted", { style: { lineHeight: "1.8" } }, S
+      ? ["• Fans never spin slower than 20%, and pumps never slower than 60%.", h("br"), "• If RigLab loses a temperature reading, or something passes 90°C, the fans go to full speed.", h("br"), "• When RigLab closes, your fans go back to how they were before."]
+      : ["• Fans never go below 20%, pumps never below 60%.  • If the temperature sensor disappears or passes 90°C, the fan goes to 100%.  ",
+        "• When RigLab closes, motherboard fans go back to BIOS control and USB hubs go back to their own defaults."]));
+    if (S) {
+      this.simpleBox = h("div");
+      el.append(this.simpleBox, safety, details("Fine-tune each fan (draw your own fan curves)", editorGrid));
+    } else {
+      this.simpleBox = null;
+      el.append(editorGrid, safety);
+    }
     await this.refresh(true);
+  },
+  drawSimple() {
+    if (!this.simpleBox) return;
+    const st = this.st;
+    if (!st.controls.length) { this.simpleBox.replaceChildren(); return; }
+    const same = (a, b) => a && b && JSON.stringify(a) === JSON.stringify(b);
+    const cur = FAN_SIMPLE.find(([k]) => st.enabled && st.controls.every(c => c.curve && same(c.curve.points, st.presets[k])));
+    const goals = h("div.goal-grid", FAN_SIMPLE.map(([k, label, desc]) => h("button.goal" + (cur && cur[0] === k ? ".on" : ""), {
+      onclick: async () => { const r = await guarded("fans.preset", () => App.api.fans_preset(k)); if (r) { toast(r.ok ? `All fans set to ${label}` : r.msg, !r.ok); this.refresh(); } } },
+      h("div.icon-badge", icon("fan")), h("div", h("div", label, cur && cur[0] === k ? h("span.pill.good", { style: { marginLeft: "8px" } }, "In use") : null), h("div.small.muted", { style: { fontWeight: 400 } }, desc)))));
+    const fanRows = st.controls.map(c => {
+      const state = c.rpm == null ? "none" : c.rpm > 0 ? "good" : (c.pump ? "bad" : "warn");
+      return lightRow("fans", null, { state, label: c.name, say: c.rpm == null ? "RigLab can't see its speed" : c.rpm > 0 ? "Spinning" : (c.pump ? "Pump not spinning - needs fixing" : "Not spinning right now") });
+    });
+    this.simpleBox.replaceChildren(
+      h("div.card", cardHead("How should my fans behave?", "fan", infoBtn("fans.preset")),
+        h("div.sub", cur ? `Your fans are set to ${cur[1]}.` : st.enabled ? "Your fans use your own settings. Pick one below to change them all." : "Your fans are controlled by your motherboard right now. Pick one below to let RigLab look after them."), goals),
+      h("div.card.mt", cardHead("Your fans", "fan"), fanRows,
+        switchRow("fans.enable", st.enabled, async (v) => { await App.api.fans_enable(v); toast(v ? "RigLab is looking after your fans" : "Fans handed back to your motherboard"); this.refresh(); return true; })));
   },
   async refresh(first) {
     const st = await App.api.fans_state();
@@ -25,15 +58,19 @@ App.pages.cooling = {
       st.controls.length ? h("div.card", { style: { marginBottom: "16px" } }, h("div.row",
         h("div.icon-badge", icon("fan")), h("div", h("div", { style: { fontWeight: 650 } }, "RigLab fan control"),
           h("div.small.muted", `${mobo} motherboard header${mobo === 1 ? "" : "s"} · ${hubs} USB hub channel${hubs === 1 ? "" : "s"}`)),
-        h("div.spacer"), switchEl(st.enabled, async v => { await App.api.fans_enable(v); toast(v ? "Fan curves active" : "Fans handed back to BIOS / hub"); this.refresh(); })))
-        : banner("bad", "alert", "<b>No controllable fans found.</b> Motherboard fans need admin + the PawnIO driver + LibreHardwareMonitor. Corsair Commander Core / Core XT / ST / Pro and NZXT hubs are controlled directly (close iCUE / NZXT CAM first). iCUE LINK hubs aren't supported yet.",
-          h("button.btn.sm", { onclick: () => go("health") }, "Health check")));
+        h("div.spacer"), infoBtn("fans.enable"), switchEl(st.enabled, async v => { await App.api.fans_enable(v); toast(v ? "Fan curves active" : "Fans handed back to BIOS / hub"); this.refresh(); })))
+        : banner("bad", "alert", isSimple() ? "<b>RigLab can't control your fans yet.</b> It usually needs a small helper or full permission first. RigLab setup shows what's missing."
+          : "<b>No controllable fans found.</b> Motherboard fans need admin + the PawnIO driver + LibreHardwareMonitor. Corsair Commander Core / Core XT / ST / Pro and NZXT hubs are controlled directly (close iCUE / NZXT CAM first). iCUE LINK hubs aren't supported yet.",
+          h("button.btn.sm", { onclick: () => go("health") }, isSimple() ? "Find out why" : "RigLab setup")));
+    if (this.simpleBox && st.controls.length) this.top.replaceChildren();     // Simple view has its own on/off switch
     if (first && st.controls.length && !this.sel) this.select(st.controls[0].id);
+    else if (first && st.controls.length && this.sel) this.select(this.sel);
     this.drawList();
+    this.drawSimple();
   },
   drawList() {
     const st = this.st;
-    if (!st.controls.length) { this.list.replaceChildren(h("div.empty.small", icon("fan"), h("div", "Nothing to control yet."))); this.editor.replaceChildren(h("div.empty", "Fix the items in Health check, then come back.")); return; }
+    if (!st.controls.length) { this.list.replaceChildren(h("div.empty.small", icon("fan"), h("div", "Nothing to control yet."))); this.editor.replaceChildren(h("div.empty", "Fix the items in RigLab setup, then come back.")); return; }
     this.list.replaceChildren(...st.controls.map(c => {
       const spin = icon("fan", "spin" + (c.rpm ? " go" : ""));
       if (c.rpm) spin.style.animationDuration = Math.max(0.25, 60 / Math.max(c.rpm, 1) * 8) + "s";
@@ -71,12 +108,12 @@ App.pages.cooling = {
         h("label.row.small", { style: { gap: "8px" } }, "This is a pump", switchEl(this.pump, v => { this.pump = v; this.drawCurve(); }))),
       h("div.curve-box", this.cv),
       h("div.row", { style: { marginTop: "10px" } }, this.live, h("div.spacer"),
-        c.curve ? h("button.btn", { onclick: async () => { await App.api.fans_remove(c.id); toast("Curve removed"); await this.refresh(); this.select(c.id); } }, icon("undo"), "Remove curve") : null,
-        h("button.btn.primary", { onclick: async () => { await App.api.fans_set_curve(c.id, this.source, this.points, this.pump); if (!this.st.enabled) await App.api.fans_enable(true); toast("Curve saved and active"); await this.refresh(); } }, icon("check"), "Save curve")),
-      h("div.opt", { style: { marginTop: "14px", borderTop: "1px solid var(--line)", paddingTop: "14px" } },
-        h("div", h("div.t", "Manual override"), h("div.d", "Hold a fixed speed for testing (pauses curves). Release gives control back.")),
+        c.curve ? actionBtn("fans.remove", async () => { await App.api.fans_remove(c.id); toast("Curve removed"); await this.refresh(); this.select(c.id); }, { icon: "undo", label: "Remove curve", always: true }) : null,
+        actionBtn("fans.curve", async () => { await App.api.fans_set_curve(c.id, this.source, this.points, this.pump); if (!this.st.enabled) await App.api.fans_enable(true); toast("Curve saved and active"); await this.refresh(); }, { cls: "primary", icon: "check", label: "Save curve", always: true })),
+      isSimple() ? null : h("div.opt", { style: { marginTop: "14px", borderTop: "1px solid var(--line)", paddingTop: "14px" } },
+        h("div", h("div.t", "Manual override ", infoBtn("fans.manual")), h("div.d", "Hold a fixed speed for testing (pauses curves). Release gives control back.")),
         h("div.row", h("div", { style: { width: "320px" } }, manual),
-          h("button.btn.sm", { onclick: async () => toast(await App.api.fans_manual(c.id, this.manualV) ? `Set to ${this.manualV}%` : "This channel didn't accept the change", false) }, "Set"),
+          h("button.btn.sm", { onclick: async () => { const ok = await guarded("fans.manual", () => App.api.fans_manual(c.id, this.manualV)); if (ok != null) toast(ok ? `Set to ${this.manualV}%` : "This channel didn't accept the change", !ok); } }, "Set"),
           h("button.btn.sm", { onclick: async () => { await App.api.fans_manual(c.id, null); toast("Released"); } }, "Release"))));
     this.bindDrag();
     requestAnimationFrame(() => this.drawCurve());

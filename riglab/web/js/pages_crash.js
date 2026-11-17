@@ -12,8 +12,9 @@ App.pages.crashes = {
     this.el = el;
     const daysSel = h("select", { onchange: e => { this.days = +e.target.value; this.scan(); } },
       [[7, "Last 7 days"], [30, "Last 30 days"], [90, "Last 90 days"]].map(([d, l]) => h("option", { value: d, selected: d === this.days }, l)));
-    el.append(pageHead("Crash Center", "Why your PC crashed: Event Viewer, Reliability Monitor and crash dump files, combined and explained in plain English.",
-      daysSel, h("button.btn", { onclick: () => this.scan() }, icon("refresh"), "Rescan")));
+    el.append(plainHead("Crashes & freezes", "Why your PC crashed, froze or restarted by itself, explained in plain English.",
+      "Crash Center", "Why your PC crashed: Event Viewer, Reliability Monitor and crash dump files, combined and explained in plain English.",
+      daysSel, h("span.act", h("button.btn", { onclick: () => this.scan() }, icon("refresh"), isSimple() ? "Look again" : "Rescan"), infoBtn("crash.scan"))));
     this.body = h("div");
     el.append(this.body);
     this.scan();
@@ -38,7 +39,7 @@ App.pages.crashes = {
         d.stability.length ? stab : h("div.small.muted", "No data (Reliability Monitor may be turned off).")),
     ];
     if (!d.debugger) parts.push(h("div.mt", banner("info", "info", "<b>Want the exact driver behind a blue screen?</b> Install Microsoft's free debugger (WinDbg) - RigLab then runs <span class='mono'>!analyze -v</span> on each dump for you.",
-      h("button.btn.sm", { onclick: async () => toast(await App.api.install_windbg()) }, icon("download"), "Install WinDbg"))));
+      actionBtn("crash.windbg", async () => toast(await App.api.install_windbg()), { cls: "sm", icon: "download", label: "Install WinDbg", always: true }))));
     const chips = h("div.chips", { style: { margin: "18px 0 12px" } }, INC_FILTERS.map(([l, f]) => h("div.chip" + (JSON.stringify(this.filter) === JSON.stringify(f) ? ".on" : ""), { onclick: () => { this.filter = f; this.draw(); } }, l)));
     parts.push(chips);
     const list = inc.filter(i => !this.filter || this.filter.includes(i.type));
@@ -84,7 +85,7 @@ App.pages.crashes = {
       if (s.state === "running") { st.textContent = `Analysing… ${Math.round(s.elapsed)} s (first run downloads Windows symbols, can take a few minutes)`; continue; }
       if (s.state === "error") {
         box.replaceChildren(s.error === "nodebugger"
-          ? banner("info", "info", "Microsoft's debugger isn't installed yet.", h("button.btn.sm", { onclick: async () => toast(await App.api.install_windbg()) }, "Install WinDbg"))
+          ? banner("info", "info", "Microsoft's debugger isn't installed yet.", actionBtn("crash.windbg", async () => toast(await App.api.install_windbg()), { cls: "sm", label: "Install WinDbg", always: true }))
           : banner("bad", "alert", "Analysis failed: " + s.error));
         return;
       }

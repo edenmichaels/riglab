@@ -2,14 +2,67 @@
 "use strict";
 
 // =================================================================== Dashboard
+/* Readings for the traffic lights, shared by Home and the Dashboard. */
+const PcLights = {
+  extra: null, at: 0,
+  async load() {
+    if (Date.now() - this.at > 30000) { this.at = Date.now(); try { this.extra = await App.api.pc_status(); } catch { this.extra = {}; } }
+    return this.extra || {};
+  },
+  fans(snap) {
+    const f = snap.sensors.filter(x => x.kind === "Fan" && x.value != null && !/^Gpu/.test(x.type));   // graphics fans stop on purpose when idle
+    if (!f.length) return "none";
+    return f.some(x => x.value > 0) ? "good" : "warn";
+  },
+  rows(snap) {
+    const s = snap.summary, x = this.extra || {};
+    const fanSt = this.fans(snap);
+    return [
+      ["cpu_temp", s.cpu_temp], ["gpu_temp", s.gpu_temp], ["ram_load", s.ram_load],
+      ["disk_free", x.disk_free_pct, { say: x.disk_free != null ? `${lightSay("disk_free", light("disk_free", x.disk_free_pct))} (${fmt.bytes(x.disk_free)} free)` : null }],
+      ["fans", null, { state: fanSt }],
+      ["crashes", x.crashes, x.crashes == null ? { say: "Not checked yet", right: h("button.btn.sm.ghost", { onclick: () => go("crashes") }, "Check now") } : {}],
+    ];
+  },
+  states(snap) { return this.rows(snap).map(([k, v, o]) => (o && o.state) || light(k, v)); },
+  overall(snap) {
+    const w = worstLight(this.states(snap));
+    return { state: w, say: { good: "Everything looks good", warn: "Something is worth a look", bad: "Something needs fixing", none: "Reading your PC…" }[w] };
+  },
+};
+
 App.pages.dashboard = {
   render(el) {
-    const s = App.snap.summary;
     this.el = el;
+    if (isSimple()) {
+      el.append(pageHead("How my PC is doing", "Green means good, yellow is worth a look, red needs fixing."));
+      this.alerts = h("div");
+      el.append(this.alerts);
+      this.showAlerts();
+      this.lightsBox = h("div");
+      this.overall = h("div.row", { style: { gap: "12px" } });
+      el.append(h("div.card", cardHead("Right now", "heart", this.overall), this.lightsBox,
+        h("div.tl-legend.mt", h("span", dot("good"), "Good"), h("span", dot("warn"), "Worth a look"), h("span", dot("bad"), "Needs fixing"))));
+      el.append(h("div.card.mt", cardHead("Things you can do", "rocket"), h("div.row.wrap", { style: { gap: "10px" } },
+        actionBtn("tweaks.recommended", async () => { const r = await App.api.tweaks_recommended(); toast(r.msg, !r.ok); }, { cls: "primary", icon: "rocket" }),
+        h("button.btn", { onclick: () => go("tweaks") }, icon("trash"), "Free up space"),
+        h("button.btn", { onclick: () => go("cooling") }, icon("fan"), "Change how my fans behave"),
+        h("button.btn", { onclick: () => go("crashes") }, icon("alert"), "Find out why my PC crashed"),
+        actionBtn("light.off", async () => { const r = await App.api.rgb_off(); toast(r === "ok" ? "Lights off" : r, r !== "ok"); }, { icon: "power" }),
+        actionBtn("report.export", async () => { const p = await App.api.export_report(); toast("Report saved: " + p); }, { icon: "download" }))));
+      const more = h("div");
+      el.append(details("Show the numbers (temperatures, speeds, power)", more));
+      this.renderFull(more, false);
+      PcLights.load().then(() => this.tick(App.snap));
+      return;
+    }
     el.append(pageHead("Dashboard", "Everything important at a glance. Click a card to dig deeper."));
     this.alerts = h("div");
     el.append(this.alerts);
     this.showAlerts();
+    this.renderFull(el, true);
+  },
+  renderFull(el, actions) {
 
     const cpuName = (App.snap.sensors.find(x => x.type === "Cpu") || {}).hw || "Processor";
     const gpuName = (App.snap.sensors.find(x => x.type.startsWith("Gpu")) || {}).hw || "Graphics card";
@@ -37,32 +90,44 @@ App.pages.dashboard = {
       tile("Network", "net", "d-net", h("div.small.muted#d-net-sub", ""))));
 
     this.fans = h("div.fanmini");
-    el.append(h("div.grid.g2.mt",
-      h("div.card", cardHead("Fans & pumps", "fan", h("button.btn.sm.ghost", { onclick: () => go("cooling") }, "Open cooling →")), this.fans),
+    const fanCard = h("div.card", cardHead("Fans & pumps", "fan", h("button.btn.sm.ghost", { onclick: () => go("cooling") }, "Open cooling →")), this.fans);
+    el.append(!actions ? h("div.mt", fanCard) : h("div.grid.g2.mt", fanCard,
       h("div.card", cardHead("Quick actions", "rocket"), h("div.quick",
-        h("button.btn", { onclick: () => go("benchmark") }, icon("bench"), "Run benchmark"),
-        h("button.btn", { onclick: () => go("stress") }, icon("flame"), "Stability test"),
+        h("span.act", h("button.btn", { onclick: () => go("benchmark") }, icon("bench"), "Run benchmark"), infoBtn("bench.start")),
+        h("span.act", h("button.btn", { onclick: () => go("stress") }, icon("flame"), "Stability test"), infoBtn("stress.start")),
         h("button.btn", { onclick: () => go("lighting") }, icon("light"), "Lighting"),
-        h("button.btn", { onclick: async () => { const r = await App.api.rgb_off(); toast(r === "ok" ? "Lights off" : r, r !== "ok"); } }, icon("power"), "All lights off"),
-        h("button.btn", { onclick: () => go("health") }, icon("heart"), "Health check"),
-        h("button.btn", { onclick: async () => { const p = await App.api.export_report(); toast("Report saved: " + p); } }, icon("download"), "System report")))));
+        actionBtn("light.off", async () => { const r = await App.api.rgb_off(); toast(r === "ok" ? "Lights off" : r, r !== "ok"); }, { icon: "power", label: "All lights off" }),
+        h("button.btn", { onclick: () => go("health") }, icon("heart"), "RigLab setup"),
+        actionBtn("report.export", async () => { const p = await App.api.export_report(); toast("Report saved: " + p); }, { icon: "download", label: "System report" })))));
   },
   async showAlerts() {
     const items = await refreshHealth();
     this.alerts.innerHTML = "";
     for (const n of (await App.api.startup_notes()) || []) {
+      if (isSimple()) {     // tuning notices are Advanced detail; crashes are worth a plain heads-up
+        if (n.kind === "bad") this.alerts.append(banner("bad", "alert", "<b>Your PC crashed or restarted by itself recently.</b> RigLab can show you why.",
+          h("button.btn.sm", { onclick: () => go("crashes") }, "Find out why")));
+        continue;
+      }
       this.alerts.append(banner(n.kind === "bad" ? "bad" : "info", n.kind === "bad" ? "alert" : "info", n.text,
         h("button.btn.sm", { onclick: () => go(n.page || (n.kind === "bad" ? "crashes" : "overclock")) }, n.page === "crashes" || n.kind === "bad" ? "Crash Center" : "Overclocking")));
     }
     const bad = items.filter(i => i.ok === false);
     if (bad.length) {
-      this.alerts.append(banner("bad", "alert", `<b>${bad.length} thing${bad.length > 1 ? "s" : ""} need${bad.length > 1 ? "" : "s"} attention:</b> ` +
-        bad.map(b => b.title).join(" · ") + ". Some sensors or controls will be missing until fixed.",
+      this.alerts.append(banner("bad", "alert", isSimple()
+        ? `<b>RigLab is missing something it needs.</b> Some readings or controls won't show until it's sorted.`
+        : `<b>${bad.length} thing${bad.length > 1 ? "s" : ""} need${bad.length > 1 ? "" : "s"} attention:</b> ` + bad.map(b => b.title).join(" · ") + ". Some sensors or controls will be missing until fixed.",
         h("button.btn.sm", { onclick: () => go("health") }, "Fix it")));
     }
   },
   async tick(snap) {
     const s = snap.summary;
+    if (this.lightsBox && document.body.contains(this.lightsBox)) {
+      PcLights.load();
+      this.lightsBox.replaceChildren(...PcLights.rows(snap).map(([k, v, o]) => lightRow(k, v, o || {})));
+      const o = PcLights.overall(snap);
+      this.overall.replaceChildren(dot(o.state), h("b", o.say));
+    }
     const set = (id, v) => { const e = $("#" + id); if (e) e.innerHTML = v; };
     this.cpu.gauge.update(s.cpu_temp, tempColor(s.cpu_temp));
     this.gpu.gauge.update(s.gpu_temp, tempColor(s.gpu_temp));
@@ -92,7 +157,7 @@ App.pages.dashboard = {
 
     const fans = snap.sensors.filter(x => x.kind === "Fan" && x.value != null);
     this.fans.innerHTML = "";
-    if (!fans.length) this.fans.append(h("div.muted.small", "No fan speed sensors yet - see Health check."));
+    if (!fans.length) this.fans.append(h("div.muted.small", "No fan speed sensors yet - see RigLab setup."));
     for (const f of fans.slice(0, 7)) {
       this.fans.append(h("div.r", h("div", { title: f.hw }, f.name, h("span.faint", " · " + f.hw.split(" › ").pop())),
         h("div.bar", h("i", { style: { width: Math.min(100, f.value / 25) + "%" } })), h("div.mono.small", { style: { textAlign: "right" } }, Math.round(f.value))));
@@ -110,7 +175,7 @@ App.pages.sensors = {
   q: "", kind: null, sel: null,
   render(el) {
     const logBtn = h("button.btn", { onclick: async () => { const r = await App.api.log_toggle(); logBtn.lastChild.textContent = r.active ? "Stop logging" : "Log to CSV"; toast(r.active ? "Logging to " + r.path : "Saved " + r.path); } }, icon("download"), h("span", "Log to CSV"));
-    el.append(pageHead("Sensors", "Every reading your hardware reports. Click a row to graph it.", logBtn));
+    el.append(pageHead("Sensors", "Every reading your hardware reports. Click a row to graph it.", h("span.act", logBtn, infoBtn("log.csv"))));
     el.append(h("div.row.wrap", { style: { marginBottom: "14px" } },
       h("div.search", { style: { maxWidth: "340px" } }, icon("search"), h("input", { type: "text", placeholder: "Search sensors… (e.g. core, nvme, fan)", value: this.q, oninput: (e) => { this.q = e.target.value.toLowerCase(); this.draw(); } })),
       h("div.chips", KIND_FILTERS.map(([l, k]) => h("div.chip" + (this.kind === k ? ".on" : ""), { onclick: (e) => { this.kind = k; $$(".chips .chip", el).forEach(c => c.classList.remove("on")); e.target.classList.add("on"); this.draw(); } }, l)))));
@@ -167,7 +232,7 @@ App.pages.hardware = {
     this.el = el;
     el.append(pageHead("Hardware", "What's inside this PC, and how healthy your drives are.",
       h("button.btn", { onclick: () => this.load(true) }, icon("refresh"), "Refresh"),
-      h("button.btn.primary", { onclick: async () => toast("Report saved: " + await App.api.export_report()) }, icon("download"), "Export report")));
+      actionBtn("report.export", async () => toast("Report saved: " + await App.api.export_report()), { cls: "primary", icon: "download", label: "Export report" })));
     this.body = h("div", h("div.empty", h("div.spinner"), h("div.mt", "Reading hardware inventory… (a few seconds)")));
     el.append(this.body);
     this.load(false);

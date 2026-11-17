@@ -67,6 +67,53 @@ def create_restore_point(desc: str = "RigLab tweaks") -> tuple[bool, str]:
     return False, msg[:300] or "Failed (needs admin)"
 
 
+SPP_CLIENTS = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\SPP\Clients"
+SPP_SYSTEM = "{09F7EDC5-294E-4180-AF6A-FB0E6A0E9513}"     # the "System Protection" client
+SR_POLICY = r"SOFTWARE\Policies\Microsoft\Windows NT\SystemRestore"
+
+
+def restore_status() -> dict:
+    """{"enabled": True/False/None (unknown), "policy_off": bool, "latest": {"time", "desc"} or None}."""
+    if not IS_WIN:
+        return {"enabled": None, "policy_off": False, "latest": None}
+    drive = os.environ.get("SYSTEMDRIVE", "C:").rstrip("\\").upper()      # e.g. "C:"
+    vols = reg_get(winreg.HKEY_LOCAL_MACHINE, SPP_CLIENTS, SPP_SYSTEM)
+    if vols is None:
+        try:
+            winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SPP_CLIENTS).Close()
+            enabled = False            # the list exists but the Windows drive isn't in it
+        except OSError:
+            enabled = None             # can't tell - RigLab will just try
+    else:
+        vols = vols if isinstance(vols, list) else [str(vols)]
+        enabled = any(f"({drive.replace(':', '%3A')})" in v.upper() for v in vols)
+    policy_off = reg_get(winreg.HKEY_LOCAL_MACHINE, SR_POLICY, "DisableSR", 0) == 1
+    latest = None
+    try:
+        r = run(["powershell", "-NoProfile", "-Command",
+                 "Get-ComputerRestorePoint -ErrorAction Stop | Sort-Object SequenceNumber | Select-Object -Last 1 "
+                 "Description,CreationTime | ConvertTo-Json -Compress"], timeout=60)
+        if r.returncode == 0 and r.stdout.strip():
+            import json
+            p = json.loads(r.stdout)
+            latest = {"time": p.get("CreationTime"), "desc": p.get("Description")}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    if latest and enabled is None:
+        enabled = True
+    return {"enabled": enabled, "policy_off": policy_off, "latest": latest}
+
+
+def enable_restore() -> tuple[bool, str]:
+    """Turn System Protection on for the Windows drive (same as ticking it in 'Create a restore point')."""
+    if not IS_WIN:
+        return False, "Windows only"
+    r = run(["powershell", "-NoProfile", "-Command", 'Enable-ComputerRestore -Drive "$env:SystemDrive\\"'], timeout=120)
+    if r.returncode == 0 and restore_status()["enabled"] is not False:
+        return True, "Restore points are now switched on"
+    return False, ((r.stderr or r.stdout).strip()[:300] or "Windows refused (RigLab needs to run as administrator)")
+
+
 # ---------------------------------------------------------------- power plans
 ULTIMATE_GUID = "e9a42b02-d5df-448d-aa00-03f14749eb61"
 

@@ -12,7 +12,7 @@ App.pages.overclock = {
   tab: "overview", sel: {},
   async render(el) {
     this.el = el;
-    el.append(pageHead("Overclocking", "Step-by-step tuning for your exact hardware. RigLab tells you what to change, tests it, and keeps a journal so crashes can be traced to the change that caused them."));
+    el.append(plainHead("Tune my hardware", "Advanced: step-by-step overclocking and graphics card tuning. Every change is tested and can be undone.", "Overclocking", "Step-by-step tuning for your exact hardware. RigLab tells you what to change, tests it, and keeps a journal so crashes can be traced to the change that caused them."));
     this.valBox = h("div");
     this.tabs = h("div.chips", { style: { marginBottom: "16px" } });
     this.body = h("div", h("div.empty", h("div.spinner"), h("div.mt", "Reading your hardware…")));
@@ -124,7 +124,8 @@ App.pages.overclock = {
     const applyBtn = h("button.btn.primary", { disabled: true }, icon("check"), "Apply to card");
     const upd = () => { const n = Object.keys(draft).length; applyBtn.disabled = !n; applyBtn.textContent = n ? `Apply ${n} change${n > 1 ? "s" : ""} to card` : "Move a slider first"; };
     applyBtn.onclick = async () => {
-      const r = await App.api.gpu_tune_apply(draft);
+      const r = await guarded("gpu.tune", () => App.api.gpu_tune_apply(draft));
+      if (r == null) return;
       const bad = Object.entries(r.result || {}).filter(([, v]) => v !== "ok");
       if (bad.length) return toast("The driver refused: " + bad.map(([k, v]) => `${caps[k]?.label || k} (${v})`).join(", "), true);
       await App.api.oc_step(step.id, "applied", `Applied: ${step.title} - ` + Object.entries(draft).map(([k, v]) => `${caps[k].label} ${v}${caps[k].unit ? " " + caps[k].unit : ""}`).join(", "));
@@ -133,7 +134,7 @@ App.pages.overclock = {
     };
     box.replaceChildren(h("div.small.muted", { style: { padding: "10px 0 2px" } }, `Live on your ${st.gpu?.name || "card"} - nothing changes until you press Apply.`),
       ...keys.map(k => typeof caps[k].value === "boolean" ? gtToggle(k, caps[k], draft, upd) : caps[k].options ? gtSelect(k, caps[k], draft, upd) : gtSlider(k, caps[k], draft, upd)),
-      h("div.row", { style: { paddingTop: "10px" } }, applyBtn, h("button.btn.ghost", { onclick: async () => { if (!confirm("Reset the graphics card to stock?")) return; await App.api.gpu_tune_reset(); toast("Stock settings restored"); this.draw(); } }, "Reset card to stock")));
+      h("div.row", { style: { paddingTop: "10px" } }, applyBtn, infoBtn("gpu.tune"), h("button.btn.ghost", { onclick: async () => { if (!confirm("Reset the graphics card to stock?")) return; await App.api.gpu_tune_reset(); toast("Stock settings restored"); this.draw(); } }, "Reset card to stock")));
     if (step.id.endsWith("power") && caps.power && caps.power.max !== caps.power.value) { draft.power = caps.power.max; box.querySelector("#gt-power") && this.fillQuick(box, "power", caps.power.max); }
     upd();
   },
@@ -147,7 +148,7 @@ App.pages.overclock = {
       h("div.sub", "Applies instantly to your current power plan. 'Disabled' boost + lower max state is a quick way to make a hot CPU much cooler."),
       h("div.opt", h("div", h("div.t", "Processor boost mode")), sel),
       h("div.opt", { style: { display: "block" } }, sliderRow("Max state", 50, 100, max, 1, "%", v => { max = v; })),
-      h("div.row.mt", h("button.btn", { onclick: async () => { const r = await App.api.oc_windows_set(mode, max); toast(r.ok ? "Applied" : "Couldn't change (needs admin)", !r.ok); this.refresh(); } }, "Apply")));
+      h("div.row.mt", actionBtn("oc.windows", async () => { const r = await App.api.oc_windows_set(mode, max); toast(r.ok ? "Applied" : "Couldn't change (needs admin)", !r.ok); this.refresh(); }, { label: "Apply", always: true })));
   },
   async mark(step, state) {
     const words = { applied: "Applied", passed: "Done", failed: "FAILED", reverted: "Undid" };
