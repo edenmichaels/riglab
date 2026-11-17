@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "RigLab"
-APP_VERSION = "3.7.0"
+APP_VERSION = "3.8.0"
 
 
 def app_dir() -> Path:
@@ -55,7 +55,7 @@ DEFAULTS: dict = {
     "rgb_profiles": {},        # name -> {device_name: "#rrggbb"}
     "overlay": {"enabled": False, "sensors": [], "corner": "top-left", "opacity": 0.85, "show_fps": False,
                 "mode": "full", "size": "m", "fps_color": "auto", "x": None, "y": None},
-    "ui": {"theme": "dark", "accent": "cyan", "start_page": "home"},
+    "ui": {"theme": "dark", "accent": "cyan", "start_page": "home", "view": "simple"},   # view: simple | advanced
 }
 
 

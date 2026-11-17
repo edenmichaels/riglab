@@ -20,3 +20,13 @@ def test_old_settings_get_new_defaults(tmp_path):
 
 def test_show_fps_off_by_default():
     assert DEFAULTS["overlay"]["show_fps"] is False
+
+
+def test_370_settings_open_in_simple_view(tmp_path):
+    old = {"ui": {"theme": "light", "accent": "violet", "start_page": "last"}, "alerts": {"cpu_temp_max": 85.0}}
+    f = tmp_path / "settings.json"
+    f.write_text(json.dumps(old), encoding="utf-8")
+    c = Config(f)
+    assert c["ui"]["view"] == "simple"                   # new default
+    assert c["ui"]["theme"] == "light" and c["ui"]["accent"] == "violet" and c["ui"]["start_page"] == "last"
+    assert c["alerts"]["cpu_temp_max"] == 85.0 and c["alerts"]["gpu_temp_max"] == DEFAULTS["alerts"]["gpu_temp_max"]

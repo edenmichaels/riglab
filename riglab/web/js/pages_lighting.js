@@ -140,11 +140,11 @@ App.pages.lighting = {
     this.view = this.view || "effects";
     this.viewChips = h("div.chips");
     this.statusPill = h("span.pill");
-    el.append(pageHead("Lighting", "Every RGB device, every LED, one stream - all moving in sync.",
+    el.append(plainHead("Lights", "Pick a colour or effect for every light in your PC.", "Lighting", "Every RGB device, every LED, one stream - all moving in sync.",
       this.statusPill, this.viewChips,
       h("button.btn", { title: "Copy diagnostics to paste when asking for help", onclick: () => this.copyReport() }, icon("info"), "Copy report"),
       h("button.btn", { onclick: async () => { toast("Rescanning devices…"); await App.api.light_rescan(); this.load(); } }, icon("refresh"), "Rescan"),
-      h("button.btn", { onclick: () => this.setState({ effect: "Off" }, true) }, icon("power"), "All off")));
+      h("span.act", h("button.btn", { onclick: () => this.setState({ effect: "Off" }, true) }, icon("power"), "All off"), infoBtn("light.off"))));
     this.body = h("div", h("div.empty", h("div.spinner"), h("div.mt", "Starting the lighting service…")));
     el.append(this.body);
     App.api.light_reset();          // every LED starts clean each time this page opens

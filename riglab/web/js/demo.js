@@ -89,7 +89,7 @@ class DemoApi {
     return v.toFixed(1) + " " + d.unit;
   }
   // ------------------------------------------------------------ api
-  async info() { return { ui: this.uiCfg || {}, version: "3.7.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
+  async info() { const ui = this.uiCfg || {}; return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.8.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
   status() { return { "LibreHardwareMonitor": "active", "liquidctl (fan hubs / AIOs)": "active", "NVIDIA NVML": "active", psutil: "active" }; }
   async snapshot() {
     this.sample(0);
@@ -137,7 +137,7 @@ class DemoApi {
       { id: "fans_hub", title: "USB fan hubs / AIOs (Corsair Commander Core/XT/ST/Pro, NZXT…)", ok: true, detail: "3 channels controllable via liquidctl.", fix: "rescan_hubs", fix_label: "Rescan" },
       { id: "openrgb", title: "OpenRGB (lighting)", ok: true, detail: "Connected." }];
   }
-  async fix(a) { if (a === "redownload_lhm") { this.lhm_install(false); return "started"; } await new Promise(r => setTimeout(r, 800)); return "Done (preview mode)"; }
+  async fix(a) { this._log("fix", "Fix it: " + a.replace(/_/g, " "), null, null, false, "fix"); if (a === "redownload_lhm") { this.lhm_install(false); return "started"; } await new Promise(r => setTimeout(r, 800)); return "Done (preview mode)"; }
   async lhm_install() {
     const t0 = Date.now(), lines = ["Downloading latest release…"];
     this.lhm = { t0, lines };
@@ -245,11 +245,11 @@ class DemoApi {
       { id: "interface", title: "Tuning interface", state: "ok", text: "Live control via NVIDIA driver (NVML) - 6 controls found." },
       { id: "controls", title: "Controls", state: "ok", text: "Every slider was tested and the driver accepts changes: Core clock offset, Memory clock offset, Power limit." },
       { id: "fps", title: "FPS capture (PresentMon)", state: "ok", text: "Ready for third-party benchmarks and games." }] }; }
-  async gpu_setup_fix() { this.fixT = Date.now(); return { ok: true }; }
+  async gpu_setup_fix(a) { this._log("gpu_setup", "Graphics card setup: " + String(a).replace(/_/g, " "), null, null, false, "fix", "Medium"); this.fixT = Date.now(); return { ok: true }; }
   async gpu_setup_job() { const p = Math.min(100, Math.round((Date.now() - this.fixT) / 40)); return p < 100 ? { running: true, msg: `Downloading… ${Math.round(p * 6.5)} / 650 MB`, pct: p } : { running: false, ok: true, msg: "NVIDIA installer 581.57 started. Choose Express installation." }; }
   async gpu_select() { return this.gpu_tune_state(); }
-  async gpu_tune_apply(v) { for (const [k, x] of Object.entries(v)) this.gtCaps()[k].value = x; this.gtPend = { state: "unverified" }; return { result: Object.fromEntries(Object.keys(v).map(k => [k, "ok"])), state: await this.gpu_tune_state() }; }
-  async gpu_tune_reset() { for (const c of Object.values(this.gtCaps())) if (c.default != null) c.value = c.default; this.gtCaps().fan_manual.value = false; this.gtPend = {}; return { ok: true, state: await this.gpu_tune_state() }; }
+  async gpu_tune_apply(v) { this._log("gpu_tune", "Applied graphics card tuning (" + Object.keys(v).join(", ") + ")", "stock", v, true, "you", "High"); for (const [k, x] of Object.entries(v)) this.gtCaps()[k].value = x; this.gtPend = { state: "unverified" }; return { result: Object.fromEntries(Object.keys(v).map(k => [k, "ok"])), state: await this.gpu_tune_state() }; }
+  async gpu_tune_reset() { this._log("gpu_reset", "Put the graphics card back to normal settings", null, null, false, "you", "None"); for (const c of Object.values(this.gtCaps())) if (c.default != null) c.value = c.default; this.gtCaps().fan_manual.value = false; this.gtPend = {}; return { ok: true, state: await this.gpu_tune_state() }; }
   async gpu_tune_confirm() { this.gtPend = { state: "verified" }; return true; }
   async gpu_metrics() { const c = this.gtCaps(), t = Date.now() / 1000, load = this.gtRun?.running ? 99 : 4;
     const clk = Math.min(c.core_cap.value, 2640 + c.core_offset.value);
@@ -343,9 +343,9 @@ class DemoApi {
       Silent: [[30, 20], [50, 30], [65, 50], [75, 75], [85, 100]], Balanced: [[30, 25], [45, 35], [60, 55], [72, 80], [82, 100]],
       Performance: [[30, 40], [45, 55], [60, 75], [70, 90], [78, 100]], "Full speed": [[0, 100], [100, 100]] } };
   }
-  async fans_set_curve(id, source, points, pump) { this.curves[id] = { source, points, pump, applied: 55 }; return true; }
+  async fans_set_curve(id, source, points, pump) { const b = this.curves[id] || null; this.curves[id] = { source, points, pump, applied: 55 }; this._log("fan_curve", "New fan curve", { cid: id, curve: b }, { cid: id }); return true; }
   async fans_remove(id) { delete this.curves[id]; return true; }
-  async fans_enable(on) { this.fanOn = on; return on; }
+  async fans_enable(on) { if (this.fanOn !== on) this._log("fans_enabled", "RigLab fan control " + (on ? "on" : "off"), { on: this.fanOn }, { on }); this.fanOn = on; return on; }
   async fans_manual() { return true; }
   async tweaks_state() {
     return { admin: true, tweaks: [
@@ -362,13 +362,48 @@ class DemoApi {
         { i: 2, name: "OpenRGB", cmd: "C:\\Program Files\\OpenRGB\\OpenRGB.exe --startminimized --server", where: "Current user", on: true },
         { i: 3, name: "EpicGamesLauncher", cmd: "\"C:\\Program Files (x86)\\Epic Games\\Launcher\\EpicGamesLauncher.exe\" -silent", where: "Current user", on: false }] };
   }
-  async tweak_set() { return "ok"; }
-  async restore_point() { await new Promise(r => setTimeout(r, 900)); return { ok: true, msg: "Restore point created" }; }
-  async set_power_plan() { return true; }
-  async add_ultimate() { return true; }
-  async set_gpu_power() { return "ok"; }
-  async startup_set() { return "ok"; }
-  async junk(clean) { await new Promise(r => setTimeout(r, 600)); return { bytes: 2.3e9, files: 4821 }; }
+  async tweak_set(id, on) { const t = (this.tw ||= {}); const before = t[id] ?? null; t[id] = on; this._log("tweak", `${(window.EXPLAIN_DATA.actions["tweak." + id] || {}).label || id}: ${on ? "on" : "off"}`, { id, on: before }, { id, on }); return "ok"; }
+  async tweaks_recommended() { await this.tweak_set("game_mode", true); return { ok: true, changed: ["game_mode"], msg: "Done - games should run a little smoother" }; }
+  async restore_point() { await new Promise(r => setTimeout(r, 900)); this._log("restore_point", "Made a safety restore point", null, null, false, "you", "None"); return { ok: true, msg: "Restore point created" }; }
+  /* Preview: the first risky change makes a restore point; after that the recent one is reused (like the 24-hour rule). */
+  async restore_prepare(risk) {
+    await new Promise(r => setTimeout(r, 900));
+    const when = (t) => "today at " + new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).toLowerCase();
+    if (this.rpOff) return risk === "High" ? { go: "block", fix: "restore.enable", msg: "Restore points are switched off on this PC, so RigLab can't make a safety backup. This change is high risk, so RigLab won't make it without a safety backup." }
+      : { go: "ask", fix: "restore.enable", msg: "Restore points are switched off on this PC, so RigLab can't make a safety backup. You can carry on without one, but you won't have an easy way back." };
+    if (this.rpTime) return { go: "proceed", msg: `Windows already has a restore point from ${when(this.rpTime)} ("RigLab safety backup"). RigLab will use that one as your safety backup.` };
+    this.rpTime = Date.now(); this._log("restore_point", "Made a safety restore point", null, null, false, "auto", "None");
+    return { go: "proceed", msg: `Safety backup made ${when(this.rpTime)}.` };
+  }
+  async restore_enable() { this.rpOff = false; this._log("restore_enable", "Turned on restore points", null, null, false, "fix"); return { ok: true, msg: "Restore points are now switched on" }; }
+  async set_power_plan(guid) { this._log("power_plan", "Power plan: " + ({ a: "Balanced", b: "High performance", c: "Power saver" }[guid] || guid), { guid: "a" }, { guid }); return true; }
+  async add_ultimate() { this._log("power_ultimate", "Added the Ultimate Performance power plan", null, null, false, "you", "None"); return true; }
+  async set_gpu_power(w) { this._log("gpu_power", `Graphics card power limit: ${w} W`, { watts: 220 }, { watts: w }, true, "you", "Medium"); return "ok"; }
+  async startup_set(i, on) { const n = ["Discord", "Steam", "OpenRGB", "EpicGamesLauncher"][i] || "App"; this._log("startup", `${n}: ${on ? "opens" : "no longer opens"} when Windows starts`, { name: n, on: !on }, { name: n, on }); return "ok"; }
+  async junk(clean) { await new Promise(r => setTimeout(r, 600)); if (clean) this._log("junk", "Freed 2.1 GB of temporary files", null, null, false); return { bytes: 2.3e9, files: 4821 }; }
+  async fans_preset(name) { for (const d of this.defs.filter(x => x.ctrl)) this._log("fan_curve", `${d.name}: ${name} fan setting`, { cid: d.id, curve: this.curves[d.id] || null }, { cid: d.id }); this.fanOn = true; return { ok: true, msg: `All fans set to ${name}`, count: 3 }; }
+  _log(kind, title, before = null, after = null, undo = true, source = "you", risk = "Low") {
+    const c = (this.changes ||= []);
+    const e = { id: c.length + 1, time: Date.now() / 1000, kind, title, before, after, risk, source, can_undo: undo && source !== "undo", undone_by: null, ok: true, detail: "" };
+    c.push(e); return e;
+  }
+  async pc_status() { return { disk_free_pct: 23.4, disk_free: 220e9, crashes: this.crashScanned ? 1 : null }; }
+  async changes_list() {
+    if (!this.changes) {   // a little history so the page isn't empty in preview
+      this._log("restore_point", "Made a safety restore point", null, null, false, "auto", "None");
+      this._log("tweak", "Put games first: on", { id: "game_mode", on: false }, { id: "game_mode", on: true });
+      this._log("startup", "Steam: no longer opens when Windows starts", { name: "Steam", on: true }, { name: "Steam", on: false });
+      this._log("fix", "Fix it: started the lighting service", null, null, false, "fix");
+      this.changes.forEach((e, i) => { e.time -= (4 - i) * 3600; });
+    }
+    return this.changes.slice().reverse().map(e => ({ ...e, undoable: e.can_undo && !e.undone_by }));
+  }
+  async change_undo(id) {
+    const e = (this.changes || []).find(x => x.id === +id);
+    if (!e || !e.can_undo || e.undone_by) return { ok: false, msg: "This change can't be undone (or was already undone)" };
+    const n = this._log(e.kind, "Undid: " + e.title, e.after, e.before, false, "undo", e.risk); e.undone_by = n.id;
+    return { ok: true, msg: "Put back the way it was" };
+  }
   async settings() { return this.cfg; }
   async save_settings(c) { this.cfg = c; return true; }
   async log_toggle() { this.logging = !this.logging; return { active: this.logging, path: "sensors_20261114.csv" }; }
@@ -405,7 +440,7 @@ class DemoApi {
   }
   async oc_step() { return {}; }
   async oc_note() { return {}; }
-  async oc_windows_set() { return { ok: true }; }
+  async oc_windows_set(b, m) { this._log("oc_windows", "Changed how hard the processor boosts", { boost_mode: 2, max_state: 100 }, { boost_mode: b, max_state: m }, true, "you", "Medium"); return { ok: true }; }
   async oc_validate(step, kind, minutes, title) { this.ocv = { step, kind, title, start: Date.now() / 1000, duration: 30, state: "running" }; return true; }
   async oc_validation() {
     const v = this.ocv; if (!v) return null;
@@ -415,6 +450,7 @@ class DemoApi {
   }
   async oc_validation_stop() { if (this.ocv) this.ocv.duration = 0; return true; }
   async crashes_scan(days) {
+    this.crashScanned = true;
     await new Promise(r => setTimeout(r, 600));
     const now = Date.now() / 1000;
     const stability = [...Array(days)].map((_, i) => ({ time: now - (days - i) * 86400, v: Math.min(10, 6 + i * 0.12 - (i === days - 3 ? 2.5 : 0)) }));
@@ -439,6 +475,6 @@ class DemoApi {
     return { state: "done", elapsed: el, raw: "...\n!analyze -v output...", result: { PROBABLY_CAUSED_BY: "AuthenticAMD.sys", IMAGE_NAME: "AuthenticAMD.sys", PROCESS_NAME: "System",
       FAILURE_BUCKET_ID: "0x124_0_AuthenticAMD_PROCESSOR_CACHE_IMAGE_AuthenticAMD.sys" } };
   }
-  async install_windbg() { return "WinDbg installer opened in a new window."; }
+  async install_windbg() { this._log("windbg", "Installed Microsoft's crash reader (WinDbg)", null, null, false); return "WinDbg installer opened in a new window."; }
   async open_url(u) { window.open(u, "_blank"); return true; }
 }

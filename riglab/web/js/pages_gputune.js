@@ -146,7 +146,8 @@ const GpuTune = {
       noCaps && r && !busy ? h("div.small", { style: { marginTop: "10px" } }, "The sliders appear as soon as the items above are sorted out.") : null));
   },
   async fix(action, data) {
-    const r = await App.api.gpu_setup_fix(action, data);
+    const r = await guarded("gpu.setup", () => App.api.gpu_setup_fix(action, data));
+    if (r == null) return;
     if (r.error) return toast(r.error, true);
     this.job = { running: true, msg: "Starting…" }; this.drawSetup();
     const poll = async () => {
@@ -165,13 +166,14 @@ const GpuTune = {
     if (!this.applyBar) return;
     const n = Object.keys(this.draft).length, has = this.st.backend !== "none";
     this.applyBar.replaceChildren(
-      h("button.btn.primary", { disabled: !n, onclick: () => this.apply() }, icon("check"), n ? `Apply ${n} change${n > 1 ? "s" : ""}` : "No changes"),
+      h("span.act", h("button.btn.primary", { disabled: !n, onclick: () => this.apply() }, icon("check"), n ? `Apply ${n} change${n > 1 ? "s" : ""}` : "No changes"), infoBtn("gpu.tune")),
       h("button.btn", { disabled: !n, onclick: () => { this.draft = {}; this.render(); } }, icon("undo"), "Discard"),
-      h("button.btn.ghost", { disabled: !has, onclick: async () => { if (!confirm("Reset the graphics card to stock settings?")) return; const r = await App.api.gpu_tune_reset(); this.st = r.state; this.draft = {}; toast("Stock settings restored"); this.render(); } }, icon("refresh"), "Reset to stock"),
+      h("button.btn.ghost", { disabled: !has, onclick: async () => { if (!confirm("Reset the graphics card to stock settings?")) return; const r = await App.api.gpu_tune_reset(); this.st = r.state; this.draft = {}; toast("Stock settings restored"); this.render(); } }, icon("refresh"), "Reset to stock"), infoBtn("gpu.reset"),
       h("span.small.muted", n ? "Changes go straight to the card through its driver. Test after every step." : ""));
   },
   async apply() {
-    const r = await App.api.gpu_tune_apply(this.draft);
+    const r = await guarded("gpu.tune", () => App.api.gpu_tune_apply(this.draft));
+    if (r == null) return;
     const bad = Object.entries(r.result || {}).filter(([, v]) => v !== "ok");
     toast(bad.length ? "Some settings were refused: " + bad.map(([k, v]) => `${k} (${v})`).join(", ") : "Applied - now run a benchmark to compare", !!bad.length);
     this.st = r.state; this.draft = {}; this.render();

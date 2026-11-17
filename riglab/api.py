@@ -14,7 +14,10 @@ import time
 import webbrowser
 from dataclasses import asdict
 
-from .core import bench, crashes, diagnostics, lhm_setup, oc, report, sysinfo, tweaks
+from datetime import datetime, timezone
+
+from .core import bench, crashes, diagnostics, explain, lhm_setup, oc, report, sysinfo, tweaks
+from .core.changes import ChangeLog
 from .core.config import APP_VERSION, app_dir
 from .core.fans import PRESETS
 from .core import fx, gpuresults, gpusetup, gputune, ledmap, overlay, presentmon
@@ -48,16 +51,19 @@ class Api:
         self._validation = None
         self._dumps = crashes.DumpAnalyzer()
         self._crash_cache = None
+        self._changes = ChangeLog()
         self.startup_notes_list = []
 
     # ------------------------------------------------------------------ general
     def info(self):
         return {"version": APP_VERSION, "admin": tweaks.is_admin(), "platform": sys.platform,
-                "status": dict(self._hub.status), "demo": False, "ui": self._cfg.data.get("ui", {})}
+                "status": dict(self._hub.status), "demo": False, "ui": self._cfg.data.get("ui", {}),
+                "view": self._cfg.data.get("ui", {}).get("view", "simple"), "lights": explain.lights(self._cfg.data.get("alerts"))}
 
     def ui_set(self, values):
         """Appearance + start page (saved immediately, no Save button needed)."""
-        self._cfg.data.setdefault("ui", {}).update({k: v for k, v in values.items() if k in ("theme", "accent", "start_page")})
+        self._cfg.data.setdefault("ui", {}).update({k: v for k, v in values.items() if k in ("theme", "accent", "start_page")
+                                                     or (k == "view" and v in ("simple", "advanced"))})
         self._cfg.save()
         return self._cfg.data["ui"]
 
@@ -88,6 +94,21 @@ class Api:
             summary[key] = v(g(id_))
         return {"t": snap.t, "sensors": sensors, "summary": summary, "status": dict(h.status)}
 
+    def pc_status(self):
+        """Extra readings for the traffic lights: free space on the Windows drive, and crashes (only if the
+        Crash Center has already looked in the last hour - scanning takes too long to do every few seconds)."""
+        out = {"disk_free_pct": None, "disk_free": None, "crashes": None}
+        try:
+            import shutil
+            u = shutil.disk_usage(os.environ.get("SYSTEMDRIVE", "C:") + "\\" if sys.platform == "win32" else "/")
+            out["disk_free_pct"], out["disk_free"] = explain.free_pct(u.total, u.free), u.free
+        except OSError:
+            pass
+        c = self._crash_cache
+        if c and c.get("days", 30) >= 30 and time.time() - c.get("scanned", 0) < 3600:
+            out["crashes"] = explain.serious_crashes(c.get("incidents"))
+        return out
+
     def series(self, ids):
         out = {}
         now = time.time()
@@ -113,6 +134,12 @@ class Api:
         return diagnostics.check(self._hub, self._light)
 
     def fix(self, action):
+        res = self._fix(action)
+        self._log("fix", "Fix it: " + _FIX_NAMES.get(action, action.replace("_", " ")), undo=False, source="fix",
+                  detail=str(res)[:200])
+        return res
+
+    def _fix(self, action):
         if action == "redownload_lhm":
             return "started" if self.lhm_install(False) else "Already running"
         if action == "connect_openrgb":
@@ -213,7 +240,10 @@ class Api:
         return gpusetup.check(self._gpu, online)
 
     def gpu_setup_fix(self, action, data=None):
-        return self._gpufix.run(action, data)
+        r = self._gpufix.run(action, data)
+        if not (isinstance(r, dict) and r.get("error")):
+            self._log("gpu_setup", "Graphics card setup: " + action.replace("_", " "), undo=False, source="fix", risk="Medium")
+        return r
 
     def gpu_setup_job(self):
         return self._gpufix.status()
@@ -224,10 +254,15 @@ class Api:
 
     def gpu_tune_apply(self, values):
         res = self._gpu.apply({k: v for k, v in values.items()})
+        good = [k for k, v in (res or {}).items() if v == "ok"]
+        if good:
+            self._log("gpu_tune", "Applied graphics card tuning (" + ", ".join(good) + ")", before="stock",
+                      after={k: values.get(k) for k in good}, risk="High")
         return {"result": res, "state": self._gpu.state()}
 
     def gpu_tune_reset(self):
         ok = self._gpu.reset()
+        self._log("gpu_reset", "Put the graphics card back to normal settings", undo=False, ok=bool(ok), risk="None")
         return {"ok": ok, "state": self._gpu.state()}
 
     def gpu_tune_confirm(self):
@@ -378,7 +413,14 @@ class Api:
         return oc.add_journal("note", text)
 
     def oc_windows_set(self, boost_mode=None, max_state=None):
+        try:
+            cur = oc.cpu_windows_settings()
+            before = {"boost_mode": cur.get("boost_mode"), "max_state": cur.get("max_state")}
+        except Exception:  # noqa: BLE001
+            before = None
         ok = oc.set_cpu_windows(boost_mode, max_state)
+        self._log("oc_windows", "Changed how hard the processor boosts", before=before,
+                  after={"boost_mode": boost_mode, "max_state": max_state}, undo=before is not None, ok=ok, risk="Medium")
         oc.add_journal("applied", f"Windows CPU: boost mode={boost_mode}, max state={max_state}")
         return {"ok": ok, **oc.cpu_windows_settings()}
 
@@ -477,6 +519,7 @@ class Api:
                 "elapsed": time.time() - job["started"]}
 
     def install_windbg(self):
+        self._log("windbg", "Installed Microsoft's crash reader (WinDbg)", undo=False)
         return crashes.install_windbg()
 
     def startup_notes(self):
@@ -643,25 +686,60 @@ class Api:
                        key=lambda d: (not d["name"].lower().startswith(("amd", "intel")), d["name"]))
         return {"controls": ctrls, "temps": temps, "enabled": self._fans.enabled, "presets": PRESETS}
 
-    def fans_set_curve(self, cid, source, points, pump=False):
+    def fans_set_curve(self, cid, source, points, pump=False, label=None):
+        before = _copy(self._fans.curves.get(cid))
         self._fans.set_curve(cid, source, points, bool(pump))
+        self._log("fan_curve", label or f"New fan curve for {self._fan_name(cid)}", before={"cid": cid, "curve": before},
+                  after={"cid": cid, "curve": _copy(self._fans.curves.get(cid))})
         return True
 
+    def fans_preset(self, name):
+        """Simple view: one preset on every fan, following the processor temperature."""
+        if name not in PRESETS:
+            return {"ok": False, "msg": "Unknown preset"}
+        st = self.fans_state()
+        if not st["controls"] or not st["temps"]:
+            return {"ok": False, "msg": "RigLab can't see any fans it can control yet"}
+        src = st["temps"][0]["id"]
+        for c in st["controls"]:
+            pump = bool(c["pump"] or (c["curve"] or {}).get("pump"))
+            self.fans_set_curve(c["id"], src, [list(x) for x in PRESETS[name]], pump, label=f"{c['name']}: {name} fan setting")
+        if not self._fans.enabled:
+            self.fans_enable(True)
+        return {"ok": True, "msg": f"All fans set to {name}", "count": len(st["controls"])}
+
     def fans_remove(self, cid):
+        before = _copy(self._fans.curves.get(cid))
         self._fans.remove_curve(cid)
+        if before:
+            self._log("fan_curve", f"Handed {self._fan_name(cid)} back to the motherboard",
+                      before={"cid": cid, "curve": before}, after={"cid": cid, "curve": None}, risk="None")
         return True
 
     def fans_enable(self, on):
+        was = self._fans.enabled
         if on:
             self._fans.enabled = True
         else:
             self._fans.release_all()
+        if was != self._fans.enabled:
+            self._log("fans_enabled", "RigLab fan control " + ("on" if self._fans.enabled else "off"),
+                      before={"on": was}, after={"on": self._fans.enabled})
         return self._fans.enabled
 
     def fans_manual(self, cid, pct=None):
         if pct is not None and cid in self._fans.curves and self._fans.enabled:
             self._fans.release_all()
-        return self._hub.set_control(cid, None if pct is None else max(20.0, float(pct)))
+        ok = self._hub.set_control(cid, None if pct is None else max(20.0, float(pct)))
+        if pct is None:
+            self._log("fan_manual", f"Released {self._fan_name(cid)}", undo=False, ok=bool(ok), risk="None")
+        else:
+            self._log("fan_manual", f"Held {self._fan_name(cid)} at {max(20, round(float(pct)))}%", before={"cid": cid},
+                      after={"cid": cid, "pct": pct}, ok=bool(ok), risk="Medium")
+        return ok
+
+    def _fan_name(self, cid):
+        return next((s.name for s in self._hub.controls() if s.id == cid), "fan")
 
     # ------------------------------------------------------------------ tweaks
     def tweaks_state(self):
@@ -687,40 +765,163 @@ class Api:
                    for i, s in enumerate(self._startup)]
         return {"tweaks": out, "plans": plans, "gpu": gpu, "startup": startup, "admin": tweaks.is_admin()}
 
-    def tweak_set(self, tid, on):
+    def tweak_set(self, tid, on, source="you"):
+        t = self._tweaks[tid]
         try:
-            self._tweaks[tid].set(bool(on))
-            return "ok"
+            before = t.get()
+        except Exception:  # noqa: BLE001
+            before = None
+        a = explain.action("tweak." + tid)
+        try:
+            t.set(bool(on))
         except Exception as e:  # noqa: BLE001
             return str(e)
+        self._log("tweak", f"{a['label']}: {'on' if on else 'off'}", before={"id": tid, "on": before},
+                  after={"id": tid, "on": bool(on)}, undo=before is not None, source=source, risk=a["risk"])
+        return "ok"
+
+    def tweaks_recommended(self):
+        """'Make games run smoother': Game Mode on, background recording off. Only changes what isn't set yet."""
+        done = []
+        for tid, want in (("game_mode", True), ("game_dvr", False)):
+            t = self._tweaks.get(tid)
+            if not t:
+                continue
+            try:
+                if t.get() == want:
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            if self.tweak_set(tid, want) == "ok":
+                done.append(tid)
+        return {"ok": True, "changed": done,
+                "msg": "Done - games should run a little smoother" if done else "Already set up for games - nothing to change"}
 
     def restore_point(self):
         ok, msg = tweaks.create_restore_point()
+        self._log("restore_point", "Made a safety restore point", undo=False, ok=ok, risk="None", detail=msg)
+        return {"ok": ok, "msg": msg}
+
+    def restore_prepare(self, risk="Medium"):
+        """Called before every Medium/High risk action. Uses a restore point from the last 24 hours if there is one,
+        otherwise makes one. Returns go = proceed / ask (Medium, carry on?) / block (High)."""
+        now = datetime.now(timezone.utc)
+        d = explain.plan_restore(risk, tweaks.restore_status(), now)
+        if d["go"] == "create":
+            ok, msg = tweaks.create_restore_point("RigLab safety backup")
+            d = explain.after_create(risk, ok, msg, tweaks.restore_status(), now)
+            self._log("restore_point", "Made a safety restore point" if ok else "Couldn't make a safety restore point",
+                      undo=False, ok=ok, source="auto", risk="None", detail=msg)
+        return d
+
+    def restore_enable(self):
+        ok, msg = tweaks.enable_restore()
+        self._log("restore_enable", "Turned on restore points", undo=False, ok=ok, source="fix", detail=msg)
         return {"ok": ok, "msg": msg}
 
     def set_power_plan(self, guid):
-        return tweaks.set_power_plan(guid)
+        plans = tweaks.power_plans()
+        before = next((p for p in plans if p["active"]), None)
+        name = next((p["name"] for p in plans if p["guid"] == guid), "power plan")
+        ok = tweaks.set_power_plan(guid)
+        self._log("power_plan", f"Power plan: {name}", before={"guid": before["guid"]} if before else None,
+                  after={"guid": guid}, undo=before is not None, ok=ok)
+        return ok
 
     def add_ultimate(self):
-        return tweaks.add_ultimate_plan()
+        ok = tweaks.add_ultimate_plan()
+        self._log("power_ultimate", "Added the Ultimate Performance power plan", undo=False, ok=ok, risk="None")
+        return ok
 
     def set_gpu_power(self, watts):
+        nv = self._hub.nvml
         try:
-            self._hub.nvml.set_power_limit(float(watts))
-            return "ok"
+            before = nv.power_limits()[2]
+        except Exception:  # noqa: BLE001
+            before = None
+        try:
+            nv.set_power_limit(float(watts))
         except Exception as e:  # noqa: BLE001
             return str(e)
+        self._log("gpu_power", f"Graphics card power limit: {round(float(watts))} W", before={"watts": before},
+                  after={"watts": float(watts)}, undo=before is not None, risk="Medium")
+        return "ok"
 
     def startup_set(self, i, on):
         try:
-            tweaks.set_startup_enabled(self._startup[int(i)], bool(on))
-            return "ok"
+            item = self._startup[int(i)]
+            before = item.enabled
+            tweaks.set_startup_enabled(item, bool(on))
         except Exception as e:  # noqa: BLE001
             return str(e)
+        self._log("startup", f"{item.name}: {'opens' if on else 'no longer opens'} when Windows starts",
+                  before={"name": item.name, "where": item.location, "on": before},
+                  after={"name": item.name, "where": item.location, "on": bool(on)})
+        return "ok"
 
     def junk(self, clean=False):
         b, n = tweaks.clean_junk() if clean else tweaks.scan_junk()
+        if clean:
+            self._log("junk", f"Freed {_size(b)} of temporary files", undo=False, detail=f"{n} files")
         return {"bytes": b, "files": n}
+
+    # ------------------------------------------------------------------ change history
+    def _log(self, kind, title, before=None, after=None, undo=True, source="you", risk="Low", detail="", ok=True):
+        try:
+            return self._changes.add(kind, title, before, after, undo=undo, source=source, risk=risk, detail=detail, ok=ok)
+        except Exception:  # noqa: BLE001
+            log.exception("change history")
+            return None
+
+    def changes_list(self):
+        return self._changes.list()
+
+    def change_undo(self, cid):
+        e = self._changes.get(cid)
+        if not self._changes.undoable(e):
+            return {"ok": False, "msg": "This change can't be undone (or was already undone)"}
+        b = e["before"]
+        try:
+            k = e["kind"]
+            if k == "tweak":
+                self._tweaks[b["id"]].set(bool(b["on"]))
+            elif k == "power_plan":
+                if not tweaks.set_power_plan(b["guid"]):
+                    raise RuntimeError("Windows didn't accept the power plan")
+            elif k == "startup":
+                item = next((s for s in tweaks.startup_items() if s.name == b["name"] and s.location == b["where"]), None)
+                if not item:
+                    raise RuntimeError("That app isn't in the startup list any more")
+                tweaks.set_startup_enabled(item, bool(b["on"]))
+            elif k == "fan_curve":
+                if b["curve"]:
+                    c = b["curve"]
+                    self._fans.set_curve(b["cid"], c.get("source"), c.get("points"), bool(c.get("pump")))
+                else:
+                    self._fans.remove_curve(b["cid"])
+            elif k == "fans_enabled":
+                if b["on"]:
+                    self._fans.enabled = True
+                else:
+                    self._fans.release_all()
+            elif k == "fan_manual":
+                self._hub.set_control(b["cid"], None)
+            elif k == "gpu_power":
+                self._hub.nvml.set_power_limit(float(b["watts"]))
+            elif k == "gpu_tune":
+                if not self._gpu.reset():
+                    raise RuntimeError("The graphics card didn't accept the reset")
+            elif k == "oc_windows":
+                if not oc.set_cpu_windows(b.get("boost_mode"), b.get("max_state")):
+                    raise RuntimeError("Windows didn't accept the change (needs admin)")
+            else:
+                return {"ok": False, "msg": "RigLab doesn't know how to undo this one"}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "msg": f"Couldn't undo: {e}"}
+        new = self._changes.add(e["kind"], "Undid: " + e["title"], before=e["after"], after=e["before"],
+                                undo=False, source="undo", risk=e.get("risk", "Low"))
+        self._changes.mark_undone(e["id"], new["id"])
+        return {"ok": True, "msg": "Put back the way it was"}
 
     # ------------------------------------------------------------------ settings
     def settings(self):
@@ -756,6 +957,22 @@ class Api:
     def open_url(self, url):
         webbrowser.open(url)
         return True
+
+
+_FIX_NAMES = {"redownload_lhm": "downloaded the sensor reader", "connect_openrgb": "started the lighting service",
+              "restart_admin": "restarted RigLab as administrator", "retry_lhm": "retried the sensor reader"}
+
+
+def _copy(v):
+    import copy
+    return copy.deepcopy(v)
+
+
+def _size(b):
+    for u in ("bytes", "KB", "MB", "GB"):
+        if b < 1024 or u == "GB":
+            return f"{b:.0f} {u}" if u == "bytes" else f"{b:.1f} {u}"
+        b /= 1024
 
 
 def _num(s: str) -> str:

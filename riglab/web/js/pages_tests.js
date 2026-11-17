@@ -12,7 +12,8 @@ const BENCH_TESTS = [
 App.pages.benchmark = {
   sel: { cpu: true, memory: true, disk: true, gpu: true },
   async render(el) {
-    el.append(pageHead("Benchmark", "Measure your PC, then re-run after a change - new cooler, BIOS update, a tweak - to see if it helped. Close games and heavy apps first."));
+    el.append(plainHead("Speed test", "See how fast your PC is. Run it again after a change to see if it helped. Close games and other apps first.",
+      "Benchmark", "Measure your PC, then re-run after a change - new cooler, BIOS update, a tweak - to see if it helped. Close games and heavy apps first."));
     const drives = await App.api.drives();
     this.drive = h("select", drives.map(d => h("option", { value: d }, d)));
     const cards = BENCH_TESTS.map(([id, name, ic, sub]) => {
@@ -20,11 +21,11 @@ App.pages.benchmark = {
         h("div.top", h("div.icon-badge", icon(ic)), h("b", name), h("div.check")), h("div.small.muted", sub));
       return c;
     });
-    this.btn = h("button.btn.primary.big", { onclick: () => this.run() }, icon("play"), "Run benchmark");
+    this.btn = h("button.btn.primary.big", { onclick: () => this.run() }, icon("play"), isSimple() ? "Test my PC's speed" : "Run benchmark");
     this.bar = h("i");
     this.msg = h("div.muted.small", "Ready.");
     el.append(h("div.card", h("div.test-cards", cards),
-      h("div.row.mt", this.btn, h("div.muted.small", { style: { marginLeft: "8px" } }, "Disk to test:"), this.drive, h("div.spacer")),
+      h("div.row.mt", this.btn, infoBtn("bench.start"), h("div.muted.small", { style: { marginLeft: "8px" } }, isSimple() ? "Drive to test:" : "Disk to test:"), this.drive, h("div.spacer")),
       h("div.mt", h("div.progress", this.bar), h("div", { style: { marginTop: "8px" } }, this.msg))));
     this.results = h("div.card.mt", cardHead("Results", "bench"), h("div.empty", "Run a benchmark to see scores. Each result is compared with your best previous run on this PC."));
     el.append(this.results);
@@ -106,6 +107,7 @@ App.pages.stress = {
     const durChips = h("div.chips", DURATIONS.map(([l, v, d]) =>
       h("div.chip" + (o.duration === v ? ".on" : ""), { title: d, onclick: (e) => { o.duration = v; $$(".chip", durChips).forEach(c => c.classList.remove("on")); e.target.classList.add("on"); } }, l)));
     this.btn = h("button.btn.primary.big", { onclick: () => this.toggle() }, icon("play"), h("span", "Start test"));
+    const stInfo = infoBtn("stress.start");
     el.append(h("div.grid", { style: { gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)" } },
       h("div.card", cardHead("What to stress", "flame"),
         tog("Processor", "All cores, error-checked maths", "cpu", "cpu"),
@@ -115,7 +117,7 @@ App.pages.stress = {
       h("div.card", cardHead("How long", "clock"), durChips,
         h("div.mt", sliderRow("Safety stop", 75, 105, o.safety, 1, "°C", v => { o.safety = v; })),
         h("div.small.muted", { style: { marginTop: "8px" } }, "Most CPUs are designed to run up to 90-100°C. The test stops instantly at this temperature."),
-        h("div.mt", this.btn))));
+        h("div.mt.row", this.btn, stInfo))));
 
     const st = (k, id) => h("div.kv", h("div.k", k), h("div.v", { id }, "—"));
     this.chart = h("canvas.chart", { style: { height: "300px" } });
