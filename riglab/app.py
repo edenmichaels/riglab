@@ -13,7 +13,6 @@ from .core.config import APP_NAME, Config, app_dir, project_root
 from .core.fans import FanCurveEngine
 from .core.hw import SensorHub
 from .core.monitor import Alerts, CsvLogger
-from .core.overlay import guess_size as _ov_guess
 from .core.lighting import LightingEngine
 
 log = logging.getLogger(__name__)
@@ -48,22 +47,28 @@ class App:
         self.csv_logger = CsvLogger(self.hub, cfg)
         self.api = Api(self)
         self.window = None
-        self.overlay = None
-        self._ov_size = None          # size the overlay page asked for
-        self._ov_hidden = False       # hidden with the hotkey (not saved)
-        self._ov_lock = threading.RLock()
-        self._ov_editing = False      # Edit position on (from Settings/tray, or while the move keys are held)
-        self._ov_manual_edit = False
-        self._ov_fs = None            # what's in front: exclusive / borderless / windowed
+        # in-game overlay (3.12: RigLab's own see-through window, see core/ovwin.py)
+        from .core import overlay as _ovm
+        from .core.ovcontrol import OverlayController
+        self.ovctl = OverlayController(lambda: self.config["overlay"], self.config.save, data=self.api.overlay_data,
+                                       look=lambda: (self.config.data.get("ui", {}).get("theme", "dark"),
+                                                     self.config.data.get("ui", {}).get("accent", "theme")))
+        self.ovwin = None
         self._ov_told = set()         # games we've already warned about exclusive fullscreen
         self._ov_notice = None
         self._ov_repairs = 0
         self._ov_last_error = None
         self._ov_hotkey_ok = True
-        from .core import overlay as _ovm
         self._ov_hold_vks = _ovm.parse_hold(cfg.data["overlay"].get("move_hold", "")) or []
-        self._ov_drag = None          # DragTracker while unlocked
         self._hotkey_tid = None       # thread id of the hotkey listener
+        # lighting: start-up log, the watcher that keeps devices found, and Windows' device/sleep messages
+        from .core.eventlog import EventLog
+        from .core.lightwatch import LightWatch
+        self.events = EventLog()
+        self.lightwatch = LightWatch(self.light, save=cfg.save, events=self.events, notes=self.api.startup_notes_list,
+                                     enabled=lambda: bool(self.config["openrgb"].get("autostart", True)),
+                                     quitting=lambda: self._quitting)
+        self.devwatch = None
         self.gpu_win = None
         self.gpu_params = {"mode": "bench", "seconds": 30}
         self.gpu_result = None
@@ -78,11 +83,6 @@ class App:
             background_color="#0a0c11", text_select=False,
             hidden=self.config["start_minimized"] or "--minimized" in sys.argv or "--weekly-check" in sys.argv)
         self.window.events.closing += self._on_closing
-        self.overlay = webview.create_window(
-            "RigLab Overlay", str(WEB / "overlay.html"), js_api=self.api,
-            width=_ov_guess(self.config["overlay"])[0], height=_ov_guess(self.config["overlay"])[1],
-            frameless=True, on_top=True, transparent=True, easy_drag=False, hidden=True, focus=False)
-        self.overlay.events.shown += self._make_clickthrough
         self._start_tray()
         from .core import instance
         instance.serve(self.quit, self.weekly_check)
@@ -95,6 +95,7 @@ class App:
         self.shutdown()
 
     def _after_start(self):
+        self._log_start()
         if self.config["overlay"]["enabled"]:
             self.apply_overlay()
         self._ov_hotkey_ok = self.overlay_hotkey() or not self.config["overlay"].get("hotkey")
@@ -142,9 +143,25 @@ class App:
         except Exception:  # noqa: BLE001
             log.exception("startup checks failed")
 
+    def _log_start(self):
+        """First lines of the start-up log: how RigLab was started and how long ago Windows started."""
+        from .core import boot
+        sysd = self.config.data.setdefault("system", {})
+        now_boot = boot.boot_time()
+        first = boot.first_start_since_boot(sysd.get("last_boot"), now_boot)
+        if now_boot is not None:
+            sysd["last_boot"] = now_boot
+            self.config.save()
+        by = "by Start with Windows" if "--minimized" in sys.argv else "by you"
+        up = f"Windows started {int((time.time() - now_boot) // 60)} min ago" if now_boot else "Windows start time unknown"
+        self.events.add("start", f"RigLab started {by}. {up}" + (" (first start since then)." if first else ".")
+                        + f" Start with Windows: {'on' if self.config.data.get('startup', {}).get('with_windows') else 'off or not set'}.")
+        self.boot_info = {"first_since_boot": first, "time": time.time()}
+
     def _lighting_start(self):
-        """One-time repair of the user's own OpenRGB settings (RigLab 2.2 disabled a detector there),
-        then start RigLab's private lighting service + stream."""
+        """One-time repair of the user's own OpenRGB settings (RigLab 2.2 disabled a detector there), start
+        RigLab's private lighting service + stream, then make sure every remembered device is there (retrying for
+        about two minutes) and keep watching for devices plugged in and the PC waking from sleep."""
         L = self.light.L
         if not L.get("migrated_v3"):
             try:
@@ -154,36 +171,32 @@ class App:
             self.config.data["corsair_direct"] = False
             L["migrated_v3"] = True
             self.config.save()
-        if self.config["openrgb"].get("autostart", True):
-            self.light.start()
-        self._boot_rescan()
-
-    def _boot_rescan(self):
-        """First start since Windows booted: USB RGB devices often appear late, so rescan a few times over about a
-        minute and reapply the last effect. Normal reopens skip this."""
-        from .core import boot
-        sysd = self.config.data.setdefault("system", {})
-        now_boot = boot.boot_time()
-        first = boot.first_start_since_boot(sysd.get("last_boot"), now_boot)
-        if now_boot is not None:
-            sysd["last_boot"] = now_boot
-            self.config.save()
-        self.boot_info = {"first_since_boot": first, "rescan": None, "running": False, "time": time.time()}
-        if not first or self.light.paused or not self.config["openrgb"].get("autostart", True):
+        if not self.config["openrgb"].get("autostart", True):
+            self.events.add("scan", "Lighting is turned off in RigLab, so no devices were scanned.")
             return
-        log.info("first start since boot: rescanning lighting (expecting %s)", self.light.L.get("known_devices"))
-        self.boot_info["running"] = True
+        self.light.start()
+        for _ in range(200):                     # wait (up to ~100 s) for the service's first connect attempt
+            if self.light.client or self._quitting or self.light.host.status in ("error", "missing"):
+                break
+            time.sleep(0.5)
+        if not self.light.client:
+            self.events.add("error", "The lighting service didn't start: " + (self.light.msg or self.light.host.error or "unknown reason"),
+                            level="error")
         try:
-            res = boot.rescan_and_reapply(self.light, quitting=lambda: self._quitting)
-        finally:
-            self.boot_info["running"] = False
-        self.boot_info["rescan"] = res
-        if not res.get("reapplied"):
-            log.warning("couldn't reapply lighting after boot")
-        msg = res.get("notice")
-        if msg:
-            log.warning(msg)
-            self.api.startup_notes_list.append({"kind": "light", "title": "Lighting device not found", "text": msg, "page": "lighting"})
+            from .core.devwatch import DeviceWatcher
+            self.devwatch = DeviceWatcher(
+                on_device=lambda vid, name: self.lightwatch.request("device", f"A device was plugged in ({self._vid_name(vid)})."),
+                on_wake=lambda: self.lightwatch.request("wake", "The PC woke from sleep."))
+            if not self.devwatch.start() and sys.platform == "win32":
+                self.events.add("error", "Couldn't listen for devices being plugged in.", level="warn")
+        except Exception as e:  # noqa: BLE001
+            self.events.add("error", f"Couldn't listen for devices being plugged in: {e}", level="warn")
+        self.lightwatch.check("startup")
+
+    @staticmethod
+    def _vid_name(vid):
+        from .core.lightwatch import LIGHT_VIDS
+        return LIGHT_VIDS.get((vid or "").upper(), "USB") + " device"
 
     # ------------------------------------------------------------------ window events
     def _on_closing(self):
@@ -225,6 +238,13 @@ class App:
         except Exception:  # noqa: BLE001
             pass
         try:
+            if self.ovwin:
+                self.ovwin.stop()                # no leftover overlay window
+            if self.devwatch:
+                self.devwatch.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             self.light.stop(keep_service=False)
         except Exception:  # noqa: BLE001
             pass
@@ -253,8 +273,8 @@ class App:
             pystray.MenuItem("Open RigLab", lambda: self.show(), default=True),
             pystray.MenuItem("Overlay", lambda: self.toggle_overlay(),
                              checked=lambda _: self.config["overlay"]["enabled"]),
-            pystray.MenuItem("Edit overlay position", lambda: self.overlay_edit(not self._ov_manual_edit),
-                             checked=lambda _: self._ov_editing),
+            pystray.MenuItem("Edit overlay position", lambda: self.overlay_edit(not self.ovctl.manual_edit),
+                             checked=lambda _: self.ovctl.editing),
             pystray.MenuItem("Quit", lambda: self.quit()))
         self.tray = pystray.Icon("RigLab", img, APP_NAME, menu)
         self.tray.run_detached()
@@ -266,210 +286,114 @@ class App:
             except Exception:  # noqa: BLE001
                 pass
 
-    # ------------------------------------------------------------------ overlay
-    def _screens(self) -> list[tuple[int, int, int, int]]:
-        """Usable area of each monitor in Windows' screen pixels (same units as the overlay's position)."""
-        from .core import winov
-        areas = winov.work_areas()
-        if areas:
-            return areas
-        out = []
-        for sc in getattr(webview, "screens", []) or []:
-            out.append((int(getattr(sc, "x", 0) or 0), int(getattr(sc, "y", 0) or 0), int(sc.width), int(sc.height)))
-        return out or [(0, 0, 1920, 1080)]
-
-    def _ov_dims(self):
-        from .core import overlay as ov
-        o = self.config["overlay"]
-        return (ov.DOT, ov.DOT) if o.get("minimised") else (self._ov_size or ov.guess_size(o))
-
+    # ------------------------------------------------------------------ overlay (3.12: native see-through window)
     def _ov_should_show(self) -> bool:
-        from .core import overlay as ov
-        return ov.should_be_visible(self.config["overlay"], self._ov_hidden, (self._ov_fs or {}).get("state"))
+        return self.ovctl.should_show()
 
     def apply_overlay(self):
-        """Show/hide, size and place the overlay from the settings. Safe to call any time."""
-        from .core import overlay as ov
-        from .core import winov
-        if not self.overlay:
-            return
+        """Show/hide, size and place the overlay from the settings. Safe to call any time, from any thread."""
         o = self.config["overlay"]
-        with self._ov_lock:
-            if self._ov_should_show():
-                w, h = self._ov_dims()
-                x, y = ov.place(o, w, h, self._screens())
-                try:
-                    self.overlay.show()
-                except Exception:  # noqa: BLE001
-                    log.exception("overlay show")
-                hwnd = self._overlay_hwnd()
-                winov.show_noactivate(hwnd)
-                winov.place(hwnd, x, y, w, h)
-                winov.set_clickthrough(hwnd, not self._ov_editing and not o.get("minimised"))
-            else:
-                try:
-                    self.overlay.hide()
-                except Exception:  # noqa: BLE001
-                    pass
+        if sys.platform != "win32":
+            self._sync_overlay_fps()
+            return
+        if o.get("enabled") and not (self.ovwin and self.ovwin.alive()):
+            self._ov_start_window()
+        elif self.ovwin:
+            self.ovwin.redraw()
         self._sync_overlay_fps()
 
-    def overlay_fit(self, w: float, h: float, dpr: float | None = None):
-        """The overlay page reports the size its content needs (CSS pixels + the screen's scaling)."""
+    def _ov_start_window(self) -> bool:
         from .core import overlay as ov
+        from .core.ovwin import NativeOverlay
         from .core import winov
-        o = self.config["overlay"]
-        if o.get("minimised"):
-            return
-        w, h = ov.window_size(max(20, min(1600, float(w))), max(12, min(900, float(h))), dpr)
-        if self._ov_size == (w, h) or not self.overlay:
-            return
-        self._ov_size = (w, h)
-        x, y = ov.place(o, w, h, self._screens())
-        winov.place(self._overlay_hwnd(), x, y, w, h)
+        if self.ovwin:
+            self.ovwin.stop()
+        self.ovwin = NativeOverlay(self.ovctl, holding=lambda: bool(self._ov_hold_vks) and winov.keys_down(self._ov_hold_vks),
+                                   needs_fps=lambda: ov.needs_fps(self.config["overlay"]))
+        ok = self.ovwin.start()
+        if not ok:
+            self._ov_last_error = self.ovwin.error or "the overlay window couldn't be created"
+            log.warning("overlay window: %s", self._ov_last_error)
+        return ok
 
     def overlay_edit(self, on: bool) -> dict:
-        """'Edit position' from Settings or the tray: the overlay takes clicks and shows a drag handle until you
-        press Done (or turn it off). Holding the move keys does the same while they're held."""
+        """'Edit position' (overlay settings or tray): the overlay takes clicks and shows an outline and a drag bar
+        until you press Done. Holding the move keys does the same while they're held."""
+        self.ovctl.set_edit(bool(on))
+        self.apply_overlay()
         o = self.config["overlay"]
-        if on and not o["enabled"]:
-            o["enabled"] = True
-            self.config.save()
-            self.apply_overlay()
-        self._ov_manual_edit = bool(on)
-        self._ov_edit_tick()
-        return {"edit": self._ov_editing, "x": o.get("x"), "y": o.get("y")}
+        return {"edit": self.ovctl.editing, "x": o.get("x"), "y": o.get("y")}
 
     def overlay_lock(self, locked: bool) -> dict:
-        """Older name (3.10): unlocked = editing."""
         r = self.overlay_edit(not locked)
         return {"locked": not r["edit"], "x": r["x"], "y": r["y"]}
 
     def overlay_minimise(self, on: bool) -> dict:
-        """Shrink to a small dot (clickable) or bring it back, in the same spot."""
-        o = self.config["overlay"]
-        if bool(on) == bool(o.get("minimised")):
-            return {"minimised": o["minimised"]}
-        self._save_overlay_pos()
-        o["minimised"] = bool(on)
-        if on:
-            self._ov_manual_edit = False        # "–" also locks it (a dot can't be dragged; you click it to restore)
-        self.config.save()
+        """Shrink to a small dot (click it to bring the overlay back) - in the same spot."""
+        self.ovctl.minimise(bool(on))
         self.apply_overlay()
-        return {"minimised": o["minimised"]}
-
-    def overlay_track(self) -> dict:
-        """3.10's overlay page called this; the keeper thread tracks dragging now."""
-        o = self.config["overlay"]
-        return {"state": None, "x": o.get("x"), "y": o.get("y")}
-
-    def _save_overlay_pos(self, drop: bool = False):
-        from .core import overlay as ov
-        from .core import winov
-        o = self.config["overlay"]
-        r = winov.rect(self._overlay_hwnd())
-        if not r:
-            return
-        x0, y0, w, h = r
-        x, y = ov.drop_position(o, x0, y0, w, h, self._screens()) if drop else ov.clamp_position(x0, y0, w, h, self._screens())
-        if (x, y) != (x0, y0):
-            winov.place(self._overlay_hwnd(), x, y, w, h)
-        if (o.get("x"), o.get("y")) != (x, y):
-            o["x"], o["y"] = x, y
-            self.config.save()
-        if self._ov_drag:
-            self._ov_drag.last = (x, y)
+        return {"minimised": bool(self.config["overlay"].get("minimised"))}
 
     def overlay_corner(self, corner: str):
-        """Move to a corner (forgets the dragged spot)."""
-        o = self.config["overlay"]
-        o["corner"], o["x"], o["y"] = corner, None, None
-        self.config.save()
+        self.ovctl.corner(corner)
         self.apply_overlay()
 
     def overlay_status(self) -> dict:
-        """For the overlay settings panel: what's going on, in plain words."""
+        """For the overlay settings: what's going on, in plain words."""
         o = self.config["overlay"]
-        fs = self._ov_fs or {}
-        return {"enabled": bool(o.get("enabled")), "visible": self._ov_should_show(), "hidden_by_key": self._ov_hidden,
-                "editing": self._ov_editing, "fullscreen": fs.get("state"), "app": fs.get("app"), "notice": self._ov_notice,
-                "hotkey_ok": self._ov_hotkey_ok, "repairs": self._ov_repairs, "last_error": self._ov_last_error}
+        st = self.ovctl.status()
+        win_err = (self.ovwin.error or (self.ovwin.win.error if self.ovwin and self.ovwin.win else None)) if self.ovwin else None
+        return {"enabled": bool(o.get("enabled")), "visible": st["visible"], "hidden_by_key": st["hidden_by_key"],
+                "editing": st["editing"], "fullscreen": st["fullscreen"], "app": st["app"], "notice": self._ov_notice,
+                "hotkey_ok": self._ov_hotkey_ok, "repairs": self._ov_repairs, "last_error": self._ov_last_error or win_err,
+                "running": bool(self.ovwin and self.ovwin.alive()), "minimised": bool(o.get("minimised"))}
 
-    # -- the keeper: one light thread (4 checks a second, almost no CPU) that makes the overlay reliable
     def _ov_keeper(self):
-        from .core import winov
-        n = 0
+        """One light thread: which kind of window is in front (exclusive fullscreen?) once a second, and bring the
+        overlay window back if it ever stops (it restarts itself, at most 5 times in 10 minutes)."""
+        restarts = []
         while not self._quitting:
-            time.sleep(0.25)
+            time.sleep(1.0)
             o = self.config["overlay"]
-            if not o.get("enabled") or not self.overlay:
-                if self._ov_editing:
-                    self._ov_manual_edit = False
-                    self._ov_edit_tick()
-                continue
-            n += 1
             try:
-                self._ov_edit_tick()
-                if n % 4 == 0:
-                    self._ov_fullscreen_tick()
-                if n % 8 == 0 and self._ov_should_show():
-                    hwnd = self._overlay_hwnd()
-                    if hwnd and not winov.visible(hwnd):       # something hid it: put it back (and remember we had to)
+                if not o.get("enabled"):
+                    if self.ovwin and self.ovwin.alive():
+                        self.ovwin.redraw()             # it hides itself
+                    continue
+                self._ov_fullscreen_tick()
+                if sys.platform == "win32" and not (self.ovwin and self.ovwin.alive()):
+                    now = time.monotonic()
+                    restarts = [t for t in restarts if now - t < 600]
+                    if len(restarts) < 5:
+                        restarts.append(now)
                         self._ov_repairs += 1
-                        log.warning("overlay was hidden by something else - showing it again (%d)", self._ov_repairs)
-                        self.apply_overlay()
-                    else:
-                        winov.keep_on_top(hwnd)
+                        log.warning("overlay window stopped - starting it again (%d)", self._ov_repairs)
+                        self._ov_start_window()
             except Exception as e:  # noqa: BLE001 - never let the keeper die silently
                 self._ov_last_error = f"{type(e).__name__}: {e}"
                 log.exception("overlay keeper")
-
-    def _ov_edit_tick(self):
-        from .core import overlay as ov
-        from .core import winov
-        o = self.config["overlay"]
-        holding = bool(self._ov_hold_vks) and winov.keys_down(self._ov_hold_vks) and o.get("enabled")
-        editing, ev = ov.edit_step(self._ov_editing, self._ov_manual_edit, holding)
-        hwnd = self._overlay_hwnd()
-        if ev == "start":
-            self._ov_editing = True
-            if o.get("minimised"):
-                o["minimised"] = False
-                self.config.save()
-                self.apply_overlay()
-            winov.set_clickthrough(hwnd, False)
-            r = winov.rect(hwnd)
-            self._ov_drag = ov.DragTracker(r[:2] if r else None)
-        elif ev == "end":
-            self._ov_editing = False
-            self._save_overlay_pos(drop=True)
-            self._ov_drag = None
-            winov.set_clickthrough(hwnd, not o.get("minimised"))
-        elif editing and self._ov_drag is not None:
-            r = winov.rect(hwnd)
-            if r and self._ov_drag.feed(r[:2]) == "settled":
-                self._save_overlay_pos(drop=True)
 
     def _ov_fullscreen_tick(self):
         from .core import overlay as ov
         from .core import winov
         fg = winov.foreground()
-        own = self._overlay_hwnd()
+        own = self.ovwin.hwnd() if self.ovwin else None
         if fg and fg[0] in (own, winov.find(APP_NAME)):
             return                                            # RigLab itself in front: keep the last answer
         state = ov.classify_fullscreen(winov.notification_state(), fg[1] if fg else None, fg[2] if fg else None, fg[3] if fg else False)
         app = winov.process_name(fg[4]) if fg and state else None
-        old = (self._ov_fs or {}).get("state")
-        self._ov_fs = {"state": state, "app": app}
+        old = self.ovctl.fullscreen
+        self.ovctl.set_fullscreen(state, app)
         msg = ov.exclusive_notice(state, app, self._ov_told)
         if msg:
             self._ov_notice = msg
             self.notify("RigLab overlay can't show", msg)
-        if (old == "exclusive") != (state == "exclusive"):
-            self.apply_overlay()
+        if (old == "exclusive") != (state == "exclusive") and self.ovwin:
+            self.ovwin.redraw()
 
     def overlay_toggle_hidden(self):
         """The show/hide hotkey: hides it until pressed again (the setting itself doesn't change)."""
-        self._ov_hidden = not self._ov_hidden
+        self.ovctl.toggle_hidden()
         self.apply_overlay()
 
     def overlay_hotkey(self):
@@ -505,15 +429,6 @@ class App:
         ok.wait(2)
         return result["ok"]
 
-    def _overlay_hwnd(self):
-        from .core import winov
-        return winov.find("RigLab Overlay")
-
-    def _overlay_pos(self):
-        from .core import winov
-        r = winov.rect(self._overlay_hwnd())
-        return r[:2] if r else None
-
     def _sync_overlay_fps(self):
         """PresentMon runs for the overlay only while the overlay is visible AND shows FPS in any style."""
         from .core import overlay as ov
@@ -543,16 +458,6 @@ class App:
         self.config["overlay"]["enabled"] = not self.config["overlay"]["enabled"]
         self.config.save()
         self.apply_overlay()
-
-    def _make_clickthrough(self):
-        """When the overlay window first appears: clicks pass through to the game (unless editing or a dot)."""
-        from .core import winov
-        o = self.config["overlay"]
-        winov.set_clickthrough(self._overlay_hwnd(), not self._ov_editing and not o.get("minimised"))
-
-    def _set_clickthrough(self, on: bool):
-        from .core import winov
-        winov.set_clickthrough(self._overlay_hwnd(), on)
 
     def pick_file(self, label: str) -> str | None:
         kind = webview.FileDialog.OPEN if hasattr(webview, "FileDialog") else webview.OPEN_DIALOG

@@ -305,16 +305,6 @@ class Api:
         self._gpurun.stop(score)
         return True
 
-    def overlay_config(self):
-        """What the overlay page should draw (re-read every second, so Settings changes show up live)."""
-        o = self._cfg["overlay"]
-        ui = self._cfg.data.get("ui", {})
-        return {"stats": list(o.get("stats") or ["fps"]), "layout": o.get("layout", "horizontal"), "size": o.get("size", "m"),
-                "opacity": float(o.get("opacity", 0.85)), "text_color": o.get("text_color", "theme"), "fps_color": o.get("fps_color", "auto"),
-                "locked": not self._app._ov_editing, "minimised": bool(o.get("minimised")), "theme": ui.get("theme", "dark"),
-                "edit": self._app._ov_editing, "editing": self._app._ov_editing, "hotkey": overlay.hotkey_label(o.get("hotkey", "")),
-                "move_hold": o.get("move_hold", ""), "visible": self._app._ov_should_show()}
-
     def overlay_data(self):
         """Just the readings the overlay shows (much lighter than snapshot)."""
         h = self._hub
@@ -333,27 +323,18 @@ class Api:
     def overlay_status(self):
         return self._app.overlay_status()
 
-    def overlay_log(self, msg):
-        """The overlay page reports its own script errors here (they used to vanish silently)."""
-        self._app._ov_last_error = str(msg)[:300]
-        log.warning("overlay page: %s", msg)
-        return True
-
     def overlay_lock(self, locked):
         return self._app.overlay_lock(bool(locked))
 
     def overlay_minimise(self, on):
         return self._app.overlay_minimise(bool(on))
 
-    def overlay_track(self):
-        return self._app.overlay_track()
-
     def overlay_set(self, values):
         """Overlay settings panel: applies straight away (no Save button). Position is only changed by dragging."""
         o = self._cfg["overlay"]
         new = dict(o)
         for k, v in (values or {}).items():
-            if k in ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color", "move_hold"):
+            if k in OVERLAY_KEYS:
                 new[k] = v
         if values.get("preset") in overlay.PRESETS:
             new = overlay.apply_preset(new, values["preset"])
@@ -361,11 +342,10 @@ class Api:
         hotkey_changed = new.get("hotkey") != o.get("hotkey")
         if new.get("hotkey") and not overlay.parse_hotkey(new["hotkey"]):
             new["hotkey"] = o.get("hotkey", "")
-        before = {k: o.get(k) for k in ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color", "move_hold")}
+        before = {k: o.get(k) for k in OVERLAY_KEYS}
         o.clear()
         o.update(new)
         self._cfg.save()
-        self._app._ov_size = None
         self._app._ov_hold_vks = overlay.parse_hold(o.get("move_hold", "")) or []
         self._app.apply_overlay()
         ok = True
@@ -381,9 +361,29 @@ class Api:
         self._app.overlay_corner(corner)
         return True
 
-    def overlay_fit(self, w, h, dpr=None):
-        self._app.overlay_fit(w, h, dpr)
-        return True
+    def overlay_preview(self, values=None, background="dark"):
+        """The overlay settings' live preview: the real overlay picture (same drawing code as the in-game
+        window) on a pretend dark or light game screen, before you apply anything. Returns a PNG data URL."""
+        import base64
+        import io
+
+        from PIL import Image
+        from .core import ovrender
+        o = overlay.migrate(dict(self._cfg["overlay"], **{k: v for k, v in (values or {}).items() if k in OVERLAY_KEYS}))
+        if (values or {}).get("preset") in overlay.PRESETS:
+            o = overlay.apply_preset(o, values["preset"])
+        ui = self._cfg.data.get("ui", {})
+        sample = {"cpu_temp": 64, "gpu_temp": 71, "cpu_load": 38, "gpu_load": 96, "ram": 47, "cpu_clock": 4950, "gpu_clock": 2610,
+                  "fps": {"state": "ok", "fps": 144, "low1": 102, "frametime": 6.9}}
+        fr = ovrender.render(o, sample, theme=ui.get("theme", "dark"), accent=ui.get("accent", "theme"),
+                             history=[6.9, 7.2, 6.8, 7.5, 6.6, 9.8, 7.0, 6.9, 7.1, 6.8] * 3)
+        bg = (238, 242, 247) if background == "light" else (23, 30, 41)
+        w, h = fr.size
+        canvas = Image.new("RGB", (w + 24, h + 24), bg)
+        canvas.paste(fr.image, (12, 12), fr.image)
+        buf = io.BytesIO()
+        canvas.save(buf, "PNG")
+        return {"png": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), "w": w, "h": h}
 
     def overlay_fps(self):
         """FPS row for the overlay: {"state": "off" | "unavailable" | "no_game"} or {"state": "ok", fps, low1, frametime, app}."""
@@ -689,13 +689,13 @@ class Api:
         return True
 
     def light_rescan(self):
-        e = self._light
-        if not e.client:
-            return self.light_connect()
+        """Rescan button: a real fresh hardware scan (restarts RigLab's lighting service), then reapply the effect."""
+        w = getattr(self._app, "lightwatch", None)
         try:
-            e.client.rescan_devices() if hasattr(e.client, "rescan_devices") else None
-            time.sleep(2)
-            e.discover()
+            if w is not None:
+                w.check("manual")
+            else:
+                self._light.full_rescan()
         except Exception as ex:  # noqa: BLE001
             return {"error": str(ex)}
         return self.light_state()
@@ -1520,6 +1520,9 @@ def boot_words(b):
                 f"{', '.join(r['missing'])}. Check it's plugged in, then press Rescan."}
     again = " and reapplied your last effect" if r.get("reapplied") else ""
     return {"state": "good", "say": f"After the restart RigLab checked for your lights, found {n} device{'s' if n != 1 else ''}{again}."}
+
+
+OVERLAY_KEYS = ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color", "move_hold")
 
 
 APPEARANCE_KEYS = {"theme": "theme", "accent": "highlight colour", "text_scale": "text size", "reduce_motion": "animations"}

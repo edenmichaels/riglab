@@ -220,6 +220,8 @@ class LightingEngine:
 
     def connect(self) -> bool:
         with self.lock:
+            if self.client is not None and self.host.running():
+                return True                     # someone else (a fresh scan) connected while we waited
             if not self.host.running():
                 self._find_native()
             if not self.host.start(progress=lambda m: setattr(self, "msg", m)):
@@ -275,9 +277,34 @@ class LightingEngine:
                 pass
             self._last.clear()
             self._fx = None
-            if keys:                                    # remembered for the after-boot rescan
-                self.L["known_devices"] = list(keys)
+            if keys:                                    # remembered so a later check knows what to wait for
+                from .lightwatch import remember
+                remember(self.L, keys)                  # added to the list, never replaced by a partial scan
             self.cfg.save()
+
+    def full_rescan(self) -> bool:
+        """A real fresh hardware scan: restart RigLab's private lighting service, which detects every device
+        again (plain re-reading the list never finds hardware that wasn't ready when the service started)."""
+        with self.lock:
+            self.client = None
+            try:
+                self.host.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("stopping the lighting service for a rescan")
+            for n in self.native:
+                try:
+                    n.close(hand_back=False)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.native = []
+            return self.connect()
+
+    def reapply(self):
+        """Send the current effect to every device again (after a rescan, wake from sleep or a device coming back)."""
+        with self.lock:
+            self._last.clear()
+            self._fx = None
+        self.set_state(**dict(self.L["state"]))
 
     def invalidate(self):
         self._fx = None
