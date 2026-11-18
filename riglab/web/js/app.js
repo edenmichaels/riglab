@@ -12,38 +12,24 @@ const App = {
   view: "simple",     // "simple" (default) or "advanced"
 };
 
-// [page, Advanced name, icon, Simple name]. No Simple name = only listed in Advanced view (still reachable).
-const NAV = [
-  ["home", "Home", "home", "Home"],
-  ["label", "Monitor", null, "My PC"],
-  ["dashboard", "Dashboard", "dash", "PC Health"],
-  ["explain", "PC summary", "chip", "PC Info"],
-  ["sensors", "Sensors", "pulse"],
-  ["hardware", "Hardware", "chip"],
-  ["crashes", "Crash Center", "alert", "Crashes & freezes"],
-  ["label", "Test", null, "Tools"],
-  ["benchmark", "Benchmark", "bench"],
-  ["stress", "Stress test", "flame"],
-  ["netspeed", "Network speed test", "net"],
-  ["label", "Control"],
-  ["overclock", "Overclocking", "bolt"],
-  ["tweaks", "Tweaks", "sliders", "Performance Tweaks"],
-  ["storage", "Storage cleanup", "trash", "Free up space"],
-  ["cooling", "Cooling", "fan", "Fans"],
-  ["lighting", "Lighting", "light", "Lights"],
-  ["benchmark", null, "bench", "Speed test"],
-  ["netspeed", null, "net", "Internet speed"],
-  ["tools", "All tools", "grid", "More tools"],
-  ["label", "App", null, "RigLab"],
-  ["history", "Change history", "undo", "Change history"],
-  ["health", "RigLab setup", "heart"],
-  ["themes", "Themes", "palette", "Themes"],
-  ["settings", "Settings", "gear", "Settings"],
-];
+/* 3.12: the left menu is just five places (window.MENU in features.js). Everything else is a tile on Tools, or
+   a tab in Settings - and every page knows which of the five it belongs to, so that item stays lit. */
+const NAV = (window.MENU || []).map(m => [m.page, m.name, m.icon, m.name]);
+function navItems() { return NAV.map(([id, name, ic]) => [id, name, ic]); }
+function sectionOf(page) {
+  if (["home", "dashboard", "lighting", "tools"].includes(page)) return page;
+  if ((window.SETTINGS_TABS || []).some(t => t.page === page)) return "settings";
+  return "tools";
+}
+const TOOL_PAGES = new Set((window.FEATURES || []).filter(f => f.tile).map(f => f.advanced.page));
 
-function navItems() {
-  const simple = isSimple();
-  return NAV.map(([id, adv, ic, easy]) => [id, simple ? easy : adv, ic]).filter(([, label]) => label);
+/* open a feature from the feature list (search, Tools tiles, Home pins): switches to Advanced view first if it's
+   an advanced-only feature in Simple view */
+function openFeature(f) {
+  const S = isSimple(), t = S ? f.simple : f.advanced;
+  if (S && t.link) return openAdvanced(f.advanced.page, { focus: f.advanced.focus, tab: f.advanced.tab });
+  if (t.tab && App.pages[t.page]) App.pages[t.page].tab = t.tab;
+  go(t.page, t.focus ? { focus: t.focus } : {});
 }
 
 /* Switches instantly (no restart): redraws the menu and the current page, keeping the same tab. Saved as ui.view. */
@@ -60,8 +46,9 @@ function drawTopbar() {
   if (!box) return;
   const S = isSimple();
   const b = (v, l, tip) => h("button" + ((v === "simple") === S ? ".on" : ""), { title: tip, "aria-pressed": (v === "simple") === S, onclick: () => { if ((v === "simple") !== S) setView(v); } }, l);
-  box.replaceChildren(
+  box.replaceChildren(...[                         // (no null children: DOM methods would print the word "null")
     App.demo ? h("div.demo-tag", "Preview mode · simulated data") : null,
+    Search.el(),
     h("div.spacer"),
     UndoBtn.el(),
     h("span.small.muted", { style: { marginRight: "4px" } }, "View:"),
@@ -70,8 +57,47 @@ function drawTopbar() {
       b("advanced", "Advanced", "Every sensor, setting and technical detail")),
     infoTip("Simple view uses plain words and hides risky settings. Advanced view shows every sensor, setting and technical detail. Nothing is removed in Simple view - switch any time."),
     h("button.btn.sm.aa", { title: "Text size", "aria-label": "Text size", onclick: (e) => textSizeMenu(e.currentTarget) },
-      h("span", { style: { fontSize: "11px" } }, "A"), h("span", { style: { fontSize: "16px", fontWeight: 700 } }, "a")));
+      h("span", { style: { fontSize: "11px" } }, "A"), h("span", { style: { fontSize: "16px", fontWeight: 700 } }, "a"))].filter(Boolean));
 }
+
+/* ------------------------------------------------------------------ search (top bar): jump to any tool or setting */
+const Search = {
+  box: null,
+  el() {
+    if (this.box) return this.box;
+    const inp = h("input.search-in", { type: "search", placeholder: "Search tools and settings", "aria-label": "Search tools and settings", autocomplete: "off",
+      oninput: () => this.show(inp.value), onfocus: () => inp.value && this.show(inp.value),
+      onkeydown: (e) => {
+        const rows = $$(".search-row", this.list);
+        const i = rows.indexOf(document.activeElement);
+        if (e.key === "ArrowDown" && rows.length) { e.preventDefault(); rows[0].focus(); }
+        if (e.key === "Enter" && this.results && this.results.length) { e.preventDefault(); this.pick(this.results[0]); }
+        if (e.key === "Escape") this.close();
+        void i;
+      } });
+    this.inp = inp;
+    this.list = h("div.search-list.hide", { role: "listbox" });
+    this.box = h("div.gsearch", icon("search"), inp, this.list);
+    document.addEventListener("click", (e) => { if (this.box && !this.box.contains(e.target)) this.close(); });
+    return this.box;
+  },
+  show(q) {
+    this.results = window.searchFeatures(q, window.FEATURES, isSimple());
+    this.list.classList.toggle("hide", !q.trim());
+    this.list.replaceChildren(...(this.results.length ? this.results.map((r, n) => h("button.search-row", { role: "option", "data-feature": r.f.id,
+      onclick: () => this.pick(r), onkeydown: (e) => {
+        const rows = $$(".search-row", this.list);
+        if (e.key === "ArrowDown") { e.preventDefault(); (rows[n + 1] || rows[0]).focus(); }
+        if (e.key === "ArrowUp") { e.preventDefault(); n ? rows[n - 1].focus() : this.inp.focus(); }
+        if (e.key === "Escape") { this.close(); this.inp.focus(); }
+      } },
+      icon((r.f.tile || {}).icon || "search"), h("span", r.f.name), r.advanced ? h("span.pill.adv", "Advanced") : null,
+      h("span.small.muted", (MENU_NAME[sectionOf(r.f.advanced.page)] || "")))) : [h("div.small.muted", { style: { padding: "8px 10px" } }, "Nothing found. Try another word, like fans, lights or speed.")]));
+  },
+  pick(r) { this.close(); this.inp.value = ""; openFeature(r.f); },
+  close() { if (this.list) this.list.classList.add("hide"); },
+};
+const MENU_NAME = Object.fromEntries((window.MENU || []).map(m => [m.page, m.name]));
 
 function textSizeMenu(anchor) {
   const old = $(".aa-menu"); if (old) { old.remove(); return; }
@@ -129,9 +155,10 @@ matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { i
 function drawNav() {
   const box = $("#navbox");
   if (!box) return;
-  box.replaceChildren(...navItems().map(([id, label, ic]) => id === "label" ? h("div.nav-label", label)
-    : h("div.nav", { "data-page": id, onclick: () => go(id) }, icon(ic), h("span", label), id === "health" ? h("i.dot.hide#healthdot") : null)));
-  $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.page === App.pageId));
+  box.replaceChildren(...navItems().map(([id, label, ic]) =>
+    h("div.nav", { "data-page": id, role: "link", tabIndex: 0, onclick: () => go(id), onkeydown: (e) => { if (e.key === "Enter") go(id); } },
+      icon(ic), h("span", label), id === "settings" ? h("i.dot.hide#healthdot") : null)));
+  $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.page === sectionOf(App.pageId)));
   const s = isSimple();
   $("#ft-cpu-k").textContent = s ? "Processor" : "CPU";
   $("#ft-gpu-k").textContent = s ? "Graphics" : "GPU";
@@ -158,7 +185,7 @@ function go(id, opts = {}) {
   if (App.page && App.page.leave) App.page.leave();
   const P = App.pages[id];
   if (!P) return;
-  $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.page === id));
+  $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.page === sectionOf(id)));
   const main = $("#main");
   main.innerHTML = "";
   main.scrollTop = 0;
@@ -170,12 +197,23 @@ function go(id, opts = {}) {
   const r = P.render(el);
   const tip = typeof Tips !== "undefined" ? Tips.banner(id) : null;
   if (tip) el.prepend(tip);
+  if (sectionOf(id) === "settings") el.prepend(settingsTabs(id));            // General | Themes | RigLab setup
+  else if (sectionOf(id) === "tools" && id !== "tools")                        // every tool has a way back to the grid
+    el.prepend(h("button.btn.ghost.sm.back-btn", { onclick: () => go("tools"), "aria-label": "Back to Tools" }, icon("back"), "Tools"));
   if (App.snap && P.tick) P.tick(App.snap);
   if (opts.focus) Promise.resolve(r).then(() => setTimeout(() => {
     const a = $(`[data-anchor="${opts.focus}"]`, el);
     for (let d = a && a.closest("details"); d; d = d.parentElement && d.parentElement.closest("details")) d.open = true;
     if (a) { a.scrollIntoView({ block: "start", behavior: "smooth" }); a.classList.add("flash"); setTimeout(() => a.classList.remove("flash"), 2200); }
   }, 350));
+}
+
+function settingsTabs(cur) {
+  const S = isSimple();
+  return h("div.seg.settings-tabs", { role: "tablist", "aria-label": "Settings" }, (window.SETTINGS_TABS || []).map(t =>
+    h("button" + (t.page === cur ? ".on" : ""), { role: "tab", "aria-selected": t.page === cur, "data-tab": t.page,
+      title: S && t.advanced ? "An advanced feature - opens in Advanced view" : t.name,
+      onclick: () => (S && t.advanced) ? openAdvanced(t.page) : go(t.page) }, t.name, S && t.advanced ? h("span.pill.adv", "Advanced") : null)));
 }
 
 async function loop() {
@@ -206,7 +244,7 @@ async function refreshHealth() {
   } catch { return []; }
 }
 
-const WEB_VERSION = "3.11.0";      // must match APP_VERSION in riglab/core/config.py (checked by a test)
+const WEB_VERSION = "3.12.0";      // must match APP_VERSION in riglab/core/config.py (checked by a test)
 
 async function start() {
   if (window.pywebview && window.pywebview.api) { App.api = window.pywebview.api; }
@@ -256,8 +294,8 @@ const UndoBtn = {
   render() {
     if (!this.box) return;
     const last = this.sum && this.sum.last;
-    const main = h("button.btn.sm.undo-main", { disabled: !last || this.busy, "aria-label": last ? "Undo: " + last.title : "Nothing to undo",
-      title: last ? "Undo: " + last.title : "Nothing to undo yet", onclick: () => last && this.undo(last) }, icon("undo"), "Undo");
+    const main = h("button.btn.sm.undo-main", { disabled: !last || this.busy, "aria-label": last ? "Undo last change: " + last.title : "Nothing to undo",
+      title: last ? "Undo last change (" + last.title + ")" : "Undo last change - nothing to undo yet", onclick: () => last && this.undo(last) }, icon("undo"), "Undo");
     const caret = h("button.btn.sm.undo-caret", { "aria-label": "Recent changes", title: "Recent changes", "aria-haspopup": "menu",
       disabled: !(this.sum && this.sum.recent && this.sum.recent.length), onclick: (e) => this.menu(e.currentTarget) }, "▾");
     this.box.replaceChildren(main, caret);

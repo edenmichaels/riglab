@@ -306,12 +306,12 @@ def test_screens_version_matches_program_version():
     assert f'version: "{APP_VERSION}"' in demo
 
 
-def test_lights_page_says_what_the_after_restart_check_found():
+def test_lights_page_says_what_the_automatic_check_found():
     from riglab.api import boot_words
-    assert boot_words(None) is None
-    assert boot_words({"first_since_boot": False}) is None
-    assert "checking" in boot_words({"first_since_boot": True, "running": True})["say"]
-    ok = boot_words({"first_since_boot": True, "rescan": {"found": ["kb", "ram"], "missing": [], "reapplied": True}})
+    W = lambda last=None: types.SimpleNamespace(busy=False, last=last)  # noqa: E731
+    assert boot_words(None) is None and boot_words(W()) is None
+    assert "checking" in boot_words(types.SimpleNamespace(busy=True, last=None))["say"]
+    ok = boot_words(W(last={"reason": "startup", "found": ["kb", "ram"], "missing": [], "reapplied": True}))
     assert ok["state"] == "good" and "found 2 devices" in ok["say"] and "reapplied" in ok["say"]
-    miss = boot_words({"first_since_boot": True, "rescan": {"found": ["kb"], "missing": ["fans"], "reapplied": True}})
-    assert miss["state"] == "warn" and "fans" in miss["say"]
+    miss = boot_words(W(last={"reason": "wake", "found": ["kb"], "missing": ["fans"], "reapplied": True, "blocked": []}))
+    assert miss["state"] == "warn" and "fans" in miss["say"] and miss["say"].startswith("After the PC woke up")

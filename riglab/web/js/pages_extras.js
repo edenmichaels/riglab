@@ -113,28 +113,49 @@ App.pages.storage = {
   },
 };
 
-// =================================================================== More tools (Simple) / All tools (Advanced)
-const FEATURE_ICONS = { sensors: "pulse", hardware: "chip", stress: "flame", overclock: "bolt", gputune: "gpu", risky_tweaks: "sliders",
-  gpu_power: "gpu", fan_manual: "fan", setup: "heart", netspeed: "net", storage: "trash", themes: "palette", overlay: "overlay" };
+// =================================================================== Tools: a grid of big tiles, like a phone's home screen
+/* Pins: the star on a tile adds it to Home (up to 4, saved as ui.pins; logged in Change history, so Undo works). */
+const Pins = {
+  get() { const p = (App.info.ui || {}).pins; return Array.isArray(p) ? p : [...(window.DEFAULT_PINS || [])]; },
+  has(id) { return Pins.get().includes(id); },
+  async toggle(id) {
+    let p = Pins.get();
+    if (p.includes(id)) p = p.filter(x => x !== id);
+    else if (p.length >= (window.MAX_PINS || 4)) { toast(`Home shows up to ${window.MAX_PINS || 4} tools. Unpin one first (tap its star).`, true); return false; }
+    else p = [...p, id];
+    (App.info.ui ||= {}).pins = p;
+    try { await App.api.ui_set({ pins: p }); } catch { /* preview */ }
+    return true;
+  },
+};
+
+function toolTile(f, { onPin } = {}) {
+  const S = isSimple(), adv = S && f.simple.link, t = f.tile;
+  const pinned = Pins.has(f.id);
+  const star = h("button.tile-star" + (pinned ? ".on" : ""), { title: pinned ? "Remove from Home" : "Add to Home", "aria-pressed": pinned,
+    "aria-label": (pinned ? "Unpin " : "Pin ") + t.short + (pinned ? " from Home" : " to Home"),
+    onclick: async (e) => { e.stopPropagation(); if (await Pins.toggle(f.id)) { if (onPin) onPin(); else star.replaceWith(toolTile(f).querySelector(".tile-star")); } } }, icon("star"));
+  return h("div.tile" + (adv ? ".tile-adv" : ""), { role: "button", tabIndex: 0, "data-tool": f.id, title: adv ? "An advanced feature - opens in Advanced view" : t.desc,
+    onclick: () => openFeature(f), onkeydown: (e) => { if (e.key === "Enter") openFeature(f); } },
+    star, h("div.tile-icon", icon(t.icon)), h("div.tile-name", t.short), h("div.tile-desc", t.desc),
+    adv ? h("div.tile-adv-tag", "Advanced view →") : null);
+}
+
 App.pages.tools = {
   render(el) {
-    const S = isSimple(), F = window.FEATURES || [];
-    const label = (page) => { const n = NAV.find(x => x[0] === page && (S ? x[3] : x[1])); return n ? (S ? n[3] : n[1]) : page; };
-    const goF = (f) => { const t = S ? f.simple : f.advanced; if (t.tab && App.pages[t.page]) App.pages[t.page].tab = t.tab; go(t.page, t.focus ? { focus: t.focus } : {}); };
-    el.append(plainHead("More tools", "Everything RigLab can do. Some tools are only shown in Advanced view - their card switches view and takes you straight there.",
-      "All tools", "Every feature and where it lives in Simple and Advanced view. Nothing exists in only one view."));
-    if (S) {
-      el.append(h("div.card", cardHead("Advanced features", "sliders"), h("div.sub", "These are hidden in Simple view because they're technical or riskier. They're still here when you want them."),
-        h("div.stack", { style: { gap: "8px" } }, F.filter(f => f.simple.link).map(f => advLink(f.name, f.advanced.page, { focus: f.advanced.focus, tab: f.advanced.tab, icon: FEATURE_ICONS[f.id] })))),
-        h("div.card.mt", cardHead("In Simple view", "home"), h("div.tool-list", F.filter(f => !f.simple.link && f.id !== "tools").map(f =>
-          h("button.tool-row", { onclick: () => goF(f) }, h("span", f.name), h("span.small.muted", label(f.simple.page) + " →"))))));
-      return;
-    }
-    el.append(h("div.card", h("table.feature-table", h("thead", h("tr", h("th", "Feature"), h("th", "Simple view"), h("th", "Advanced view"))),
-      h("tbody", F.map(f => h("tr",
-        h("td", h("a", { href: "#", onclick: (e) => { e.preventDefault(); goF(f); } }, f.name)),
-        h("td", f.simple.link ? h("span.small", "Card in More tools → opens Advanced") : label(f.simple.page) + (f.simple.focus ? " (section)" : "")),
-        h("td", label(f.advanced.page) + (f.advanced.tab ? " → GPU tab" : "") + (f.advanced.focus ? " (section)" : ""))))))));
+    this.el = el;
+    const S = isSimple(), F = (window.FEATURES || []).filter(f => f.tile);
+    el.append(plainHead("Tools", "Everything RigLab can do. Tap a tool to open it. Tap the star to put it on Home.",
+      "Tools", "Every tool. The star pins it to Home (up to 4)."));
+    const everyday = F.filter(f => !f.simple.link), advanced = F.filter(f => f.simple.link);
+    const draw = () => this.grid.replaceChildren(
+      h("div.tile-grid", everyday.map(f => toolTile(f, { onPin: draw }))),
+      h("h2.home-h2.mt", S ? "Advanced tools" : "More tools"),
+      S ? h("div.small.muted", { style: { margin: "-4px 0 12px" } }, "These are more technical, so they open in Advanced view. You can switch back any time.") : null,
+      h("div.tile-grid", advanced.map(f => toolTile(f, { onPin: draw }))));
+    this.grid = h("div");
+    el.append(this.grid);
+    draw();
   },
 };
 

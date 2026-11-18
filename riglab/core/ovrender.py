@@ -212,13 +212,14 @@ def render(cfg: dict, data: dict | None, dpi_scale: float = 1.0, editing: bool =
     if editing:
         fb = font("bold", 11 * k)
         bar_w = int(round(8 * k) + round(14 * k) + tw(fb, "Drag to move") + round(10 * k) + 2 * (round(8 * k) * 2) + tw(fb, "–") + tw(fb, "Done") + round(14 * k))
-    W = max(pw, bar_w) + 2 * PAD
-    H = ph + bar_h + bar_gap + 2 * PAD
+    P = max(PAD, round(2 * k) + 1) if editing else PAD      # room for the edit outline, which is drawn on the panel's edge
+    W = max(pw, bar_w) + 2 * P
+    H = ph + bar_h + bar_gap + 2 * P
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))     # every pixel starts fully see-through
     dr = ImageDraw.Draw(img)
     regions = {}
-    y0 = PAD + bar_h + bar_gap
-    panel = (PAD, y0, PAD + pw - 1, y0 + ph - 1)
+    y0 = P + bar_h + bar_gap
+    panel = (P, y0, P + pw - 1, y0 + ph - 1)
     regions["panel"] = panel
     radius = round(10 * k)
     if not shadow:
@@ -226,7 +227,7 @@ def render(cfg: dict, data: dict | None, dpi_scale: float = 1.0, editing: bool =
         dr.rounded_rectangle(panel, radius, fill=C["panel"] + (a,), outline=C["line"] + (a,), width=max(1, round(k)))
     if editing:
         _dashed_round_rect(dr, panel, radius, C["accent"], max(2, round(2 * k)), round(6 * k))
-        regions.update(_bar(dr, C, k, PAD, PAD, bar_w, bar_h))
+        regions.update(_bar(dr, C, k, P, P, bar_w, bar_h))
 
     def text(xy, t, f, fill, anchor="ls"):
         if shadow:
@@ -239,18 +240,18 @@ def render(cfg: dict, data: dict | None, dpi_scale: float = 1.0, editing: bool =
         y = y0 + pady
         for key, v, u, col, f in items:
             base = y + round(row_h * 0.75)
-            text((PAD + padx, base), NAMES[key], f_lab, muted_c)
-            x_right = PAD + pw - padx
+            text((P + padx, base), NAMES[key], f_lab, muted_c)
+            x_right = P + pw - padx
             if u:
                 text((x_right, base), u, f_unit, muted_c, anchor="rs")
                 x_right -= tw(f_unit, u) + round(3 * k)
             text((x_right, base), v, f, col, anchor="rs")
             y += row_h
         if graph:
-            _graph(dr, C, (PAD + padx, y + round(4 * k), PAD + padx + gw, y + round(4 * k) + gh), history)
+            _graph(dr, C, (P + padx, y + round(4 * k), P + padx + gw, y + round(4 * k) + gh), history)
     else:
         base = y0 + pady + asc + round(2 * k)
-        x = PAD + padx
+        x = P + padx
         for key, v, u, col, f in items:
             text((x, base), v, f, col)
             x += tw(f, v) + round(5 * k)

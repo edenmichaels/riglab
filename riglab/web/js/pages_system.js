@@ -116,9 +116,29 @@ App.pages.health = {
       h("br"), "• A ", h("b", "Corsair Lighting Node"), " → lighting only; the fans' speed cables go to the motherboard.",
       h("br"), "• An ", h("b", "iCUE LINK System Hub"), " → not supported by open-source tools yet; use iCUE, or FanControl with the CorsairLink plugin."));
     el.append(isSimple() ? details("Why can't RigLab control my Corsair fans?", corsair) : corsair);
+    this.logBox = h("div.card.mt", { "data-anchor": "startlog" });
+    el.append(this.logBox);
+    this.drawLog();
     this.load();
     const st = await App.api.lhm_status();
     if (st.running) this.watch();
+  },
+  /* Start-up log: what RigLab scanned and found at start-up, after sleep and when devices were plugged in. */
+  async drawLog() {
+    let r = { items: [], text: "" };
+    try { r = await App.api.startup_log(); } catch { /* none */ }
+    if (!this.logBox || !this.logBox.isConnected && this.logBox.dataset.drawn) return;
+    this.logBox.dataset.drawn = "1";
+    const lv = { info: "good", warn: "warn", error: "bad" };
+    const rows = (r.items || []).slice(0, 60).map(e => h("div.log-row", dot(lv[e.level] || "none"),
+      h("span.small.muted.mono", new Date(e.time * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" })),
+      h("span", safe(e.text))));
+    this.logBox.replaceChildren(cardHead("Start-up log", "report",
+        h("button.btn.sm", { onclick: () => this.drawLog() }, icon("refresh"), "Refresh"),
+        h("button.btn.sm", { onclick: () => navigator.clipboard.writeText(r.text || "").then(() => toast("Start-up log copied - paste it when asking for help"), () => toast("Couldn't copy", true)) }, icon("download"), "Copy")),
+      h("div.sub", "What RigLab looked for when it started, after the PC woke from sleep, and when devices were plugged in - and what it found."),
+      rows.length ? h("div.log-list", rows) : h("div.small.muted", "Nothing logged yet."),
+      colourKey({ label: "What do the dots mean?" }));
   },
   async load() {
     this.box.replaceChildren(h("div.empty", h("div.spinner")));
@@ -177,102 +197,12 @@ App.pages.health = {
 };
 
 // =================================================================== Settings
-const OV_STATS = [["fps", "FPS"], ["low1", "1% lows"], ["frametime", "Frame time"], ["cpu_temp", "CPU temp"], ["gpu_temp", "GPU temp"],
-  ["cpu_load", "CPU usage"], ["gpu_load", "GPU usage"], ["ram", "RAM"], ["cpu_clock", "CPU clock"], ["gpu_clock", "GPU clock"], ["graph", "Frame-time graph"]];
-const OV_PRESETS = [["minimal", "Minimal", "FPS only"], ["standard", "Standard", "FPS + temperatures"], ["full", "Full", "Everything"]];
-
-/* Overlay settings. Every change applies straight away (no Save needed) and is saved. */
-function overlayCard(initial) {
-  let ov = Object.assign({}, initial), editing = false;
-  const box = h("div.card#overlay-settings", { "data-anchor": "overlay" });
-  const statusLine = h("div");
-  /* What's going on, in plain words - including why it can't show (exclusive fullscreen) or why it's hidden. */
-  const status = async () => {
-    if (!box.isConnected && status.ran) return;
-    status.ran = true;
-    let st;
-    try { st = await App.api.overlay_status(); } catch { st = null; }
-    if (!st) return;
-    if (st.editing !== editing) { editing = st.editing; draw(); }
-    const msgs = [];
-    if (st.notice && st.fullscreen === "exclusive") msgs.push(banner("bad", "alert", "<b>The overlay can't show over this game.</b> " + st.notice));
-    else if (st.hidden_by_key) msgs.push(banner("info", "info", `The overlay is hidden with your show/hide key${ov.hotkey ? ` (${ov.hotkey})` : ""}. Press it again to show it.`));
-    if (st.hotkey_ok === false) msgs.push(banner("bad", "alert", "Another app is already using your show/hide key. Pick a different one below."));
-    if (st.last_error && !App.demo) msgs.push(h("div.small.muted", "Last overlay problem (sent to RigLab's log): " + st.last_error));
-    statusLine.replaceChildren(...msgs);
-    setTimeout(status, 2000);
-  };
-  const set = async (values) => {
-    try { const r = await App.api.overlay_set(values); ov = r.overlay; if (values.hotkey !== undefined && !r.hotkey_ok) toast("That key combination is already used by another app. Try a different one.", true); }
-    catch (e) { toast("Couldn't change the overlay: " + e, true); }
-    draw();
-  };
-  const seg = (items, cur, onPick) => h("div.seg", items.map(([k, l]) => h("button" + (cur === k ? ".on" : ""), { "aria-pressed": cur === k, onclick: () => onPick(k) }, l)));
-  const draw = () => {
-    const S = isSimple(), stats = ov.stats || ["fps"];
-    const hk = h("input", { type: "text", readOnly: true, value: ov.hotkey || "", placeholder: "Click, then press keys", style: { width: "170px" }, "aria-label": "Show/hide hotkey",
-      onkeydown: (e) => {
-        e.preventDefault();
-        if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
-        if (e.key === "Escape" || e.key === "Backspace") { set({ hotkey: "" }); return; }
-        const k = e.key.length === 1 ? e.key.toUpperCase() : e.key;
-        const combo = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", k].filter(Boolean).join("+");
-        if (!e.ctrlKey && !e.altKey && !/^F\d+$/.test(k)) { toast("Use Ctrl, Alt or Shift with a key (or an F key), so normal typing in games isn't caught.", true); return; }
-        set({ hotkey: combo });
-      } });
-    const more = [
-      h("div.small.muted", { style: { margin: "6px 0" } }, "What to show"),
-      h("div.chips", OV_STATS.map(([k, l]) => h("div.chip" + (stats.includes(k) ? ".on" : ""), { role: "checkbox", "aria-checked": stats.includes(k), tabIndex: 0,
-        onclick: () => { const st = stats.includes(k) ? stats.filter(x => x !== k) : [...stats, k]; if (!st.length) return toast("Keep at least one thing on the overlay", true); set({ stats: st }); } }, l))),
-      h("div.opt", h("div.t", "Layout"), seg([["horizontal", "Side by side"], ["vertical", "Stacked"]], ov.layout, (v) => set({ layout: v }))),
-      h("div.opt", h("div", h("div.t", "Text colour"), h("div.d", "Follow theme uses your RigLab theme's colours.")),
-        h("div.row", { style: { gap: "8px" } }, seg([["theme", "Follow theme"], ["white", "White"], ["custom", "Custom"]], /^#/.test(ov.text_color || "") ? "custom" : ov.text_color,
-          (v) => set({ text_color: v === "custom" ? "#36d6ff" : v })),
-          /^#/.test(ov.text_color || "") ? h("input", { type: "color", value: ov.text_color, "aria-label": "Custom text colour", onchange: (e) => set({ text_color: e.target.value }) }) : null)),
-      h("div.opt", h("div", h("div.t", "Colour numbers green / yellow / red"), h("div.d", "FPS and temperatures change colour when they're good, worth checking, or a problem.")),
-        switchEl(ov.fps_color !== "plain", (v) => set({ fps_color: v ? "auto" : "plain" }))),
-      h("div.opt", h("div", h("div.t", "Snap to the nearest corner"), h("div.d", "When you let go after dragging, it jumps neatly into the closest corner.")),
-        switchEl(!!ov.snap, (v) => set({ snap: v }))),
-      h("div.opt", h("div", h("div.t", "Hold to move"), h("div.d", "Hold these keys and drag the overlay. Let go to lock it again.")),
-        h("select", { "aria-label": "Keys to hold to move the overlay", onchange: (e) => set({ move_hold: e.target.value }) },
-          [["Ctrl+Alt", "Ctrl + Alt"], ["Ctrl+Shift", "Ctrl + Shift"], ["Alt+Shift", "Alt + Shift"], ["", "Off (use Edit position)"]].map(([v, l]) => h("option", { value: v, selected: (ov.move_hold ?? "Ctrl+Alt") === v }, l)))),
-      h("div.opt", h("div", h("div.t", "Show / hide key"), h("div.d", ov.hotkey ? `Press ${ov.hotkey} in any game to hide or show the overlay. Backspace clears it.` : "Optional. Pick a key combination to hide or show the overlay in any game.")),
-        h("div.row", { style: { gap: "6px" } }, hk, ov.hotkey ? h("button.btn.sm", { onclick: () => set({ hotkey: "" }) }, "Clear") : null)),
-      h("div.opt", h("div.t", "Move to a corner now"),
-        h("select", { "aria-label": "Move the overlay to a corner", onchange: async (e) => { if (!e.target.value) return; await App.api.overlay_corner(e.target.value); ov.x = ov.y = null; ov.corner = e.target.value; toast("Moved to the " + e.target.value.replace("-", " ") + " corner"); draw(); } },
-          h("option", { value: "" }, "Choose a corner…"), [["top-left", "Top left"], ["top-right", "Top right"], ["bottom-left", "Bottom left"], ["bottom-right", "Bottom right"]].map(([k, l]) => h("option", { value: k }, l)))),
-    ];
-    box.replaceChildren(cardHead("In-game overlay", "overlay"),
-      h("div.sub", "A small box on top of your games that shows FPS and other readings. It works in borderless and windowed games (not exclusive fullscreen)."),
-      statusLine,
-      h("div.opt", h("div.t", "Show overlay"), switchEl(!!ov.enabled, (v) => set({ enabled: v }))),
-      h("div.small.muted", { style: { margin: "8px 0 6px" } }, "Preset"),
-      h("div.row.wrap", { style: { gap: "8px" } }, OV_PRESETS.map(([k, l, d]) => h("button.btn.sm" + (ov.preset === k ? ".primary" : ""), { "aria-pressed": ov.preset === k, title: d, onclick: () => set({ preset: k }) }, l, h("span.small", { style: { opacity: .75, marginLeft: "6px" } }, d))),
-        ov.preset === "custom" ? h("span.pill", "Your own mix") : null),
-      h("div.opt", h("div.t", "Size"), seg([["s", "Small"], ["m", "Medium"], ["l", "Large"], ["xl", "Extra large"]], ov.size, (v) => set({ size: v }))),
-      h("div", { style: { padding: "6px 0" } }, sliderRow("Background", 0, 100, Math.round((ov.opacity ?? 0.85) * 100), 5, "%", debounce((v) => set({ opacity: v / 100 }), 250))),
-      h("div.opt", h("div", h("div.t", "Position"), h("div.d", editing
-          ? "Editing: drag the overlay by its handle, then press Done (on the overlay or here)."
-          : `Clicks always go straight through to your game.${ov.move_hold ? ` To move it, hold ${ov.move_hold} and drag it, or press Edit position.` : " Press Edit position to move it."}`)),
-        h("button.btn.sm" + (editing ? ".primary" : ""), { onclick: async () => { const r = await App.api.overlay_edit(!editing); editing = r.edit; ov.enabled = true; draw(); } },
-          icon(editing ? "check" : "move"), editing ? "Done" : "Edit position")),
-      h("div.opt", h("div", h("div.t", "Shrink to a dot"), h("div.d", "Hides the readings and leaves a small dot. Click the dot to bring them back.")),
-        switchEl(!!ov.minimised, async (v) => { await App.api.overlay_minimise(v); ov.minimised = v; draw(); })),
-      S ? details("More overlay options (what to show, layout, colours, hotkey)", ...more) : h("div", ...more),
-      h("div.mt", colourKey({ label: "What do the overlay colours mean?" })),
-      App.demo ? h("div.small.muted.mt", "Preview mode: ", h("a", { href: "overlay.html", target: "_blank" }, "open the overlay preview"), " to see and drag it.") : null);
-  };
-  draw();
-  status();
-  return box;
-}
-
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 /* Display: text size, start page and animations. (Themes and colours have their own Themes page.) */
 function displayCard(c) {
   const ui = c.ui || (c.ui = {});
-  const box = h("div.card#display");
+  const box = h("div.card#display", { "data-anchor": "display" });
   const draw = () => {
     const cur = Theme.cur;
     box.replaceChildren(cardHead("Display", "monitor"),
@@ -291,7 +221,7 @@ function displayCard(c) {
 }
 
 function helpCard() {
-  const box = h("div.card");
+  const box = h("div.card", { "data-anchor": "startup" });
   const draw = async () => {
     let w = { on: false }, a = { on: false };
     try { w = await App.api.weekly_state(); a = await App.api.autostart_state(); } catch { /* preview */ }
@@ -310,13 +240,15 @@ function helpCard() {
 }
 
 function creditsList() {
-  return details("Theme credits and licences", h("div.small", { style: { lineHeight: 1.7 } },
+  return details("Credits and licences", h("div.small", { style: { lineHeight: 1.7 } },
     THEMES.filter(([, , c]) => /licen/i.test(c)).map(([, n, c]) => h("div", h("b", n), " - ", c)),
-    h("div.muted", "All theme palettes are used under the MIT licence, which allows use in commercial software with credit.")));
+    h("div.muted", "All theme palettes are used under the MIT licence, which allows use in commercial software with credit."),
+    h("div", { style: { marginTop: "6px" } }, h("b", "Icons"), " - the Undo, star, back-arrow and help icons are from Lucide (lucide.dev), ISC licence. Other icons are RigLab's own."),
+    h("div", h("b", "Speed test"), " - uses Cloudflare's speed test servers (speed.cloudflare.com).")));
 }
 
 function viewCard() {
-  const box = h("div.card.glow");
+  const box = h("div.card.glow", { "data-anchor": "view" });
   const draw = () => {
     const S = isSimple();
     const b = (v, l) => h("button" + ((v === "simple") === S ? ".on" : ""), { "aria-pressed": (v === "simple") === S, onclick: () => setView(v) }, l);
@@ -333,7 +265,7 @@ function viewCard() {
 App.pages.settings = {
   async render(el) {
     const c = await App.api.settings();
-    const a = c.alerts, ov = c.overlay, S = isSimple();
+    const a = c.alerts, S = isSimple();
     const save = async () => { await App.api.save_settings(c); try { App.info = await App.api.info(); } catch { /* keep old */ } toast("Settings saved"); };
     el.append(pageHead("Settings", null, h("button.btn.primary", { onclick: save }, icon("check"), "Save")));
     el.append(viewCard());
@@ -353,27 +285,25 @@ App.pages.settings = {
         h("div.row.mt", h("button.btn", { onclick: () => App.api.open_folder("data") }, icon("folder"), S ? "Open RigLab's folder" : "Open data folder"))];
     if (S) {
       el.append(h("div.grid.g2.mt",
-        h("div.card", cardHead("Too-hot warnings", "thermo"), h("div.sub", "A Windows pop-up warns you when something gets too hot. These limits also decide when lights turn yellow and red."),
+        h("div.card", { "data-anchor": "alerts" }, cardHead("Too-hot warnings", "thermo"), h("div.sub", "A Windows pop-up warns you when something gets too hot. These limits also decide when lights turn yellow and red."),
           h("div.opt", h("div.t", "Warn me"), switchEl(a.enabled, v => { a.enabled = v; })),
           details("Change the limits",
             h("div.stack", { style: { gap: "14px" } },
               sliderRow("Processor", 60, 105, a.cpu_temp_max, 1, "°C", v => { a.cpu_temp_max = v; }),
               sliderRow("Graphics card", 60, 100, a.gpu_temp_max, 1, "°C", v => { a.gpu_temp_max = v; }),
               sliderRow("Drives", 40, 80, a.drive_temp_max, 1, "°C", v => { a.drive_temp_max = v; })))),
-        overlayCard(ov),
         h("div.card", cardHead("General", "gear"), ...general, details("Technical settings", ...technical)),
         h("div.card", cardHead("About", "info"), ...about, creditsList()),
         helpCard()));
       return;
     }
     el.append(h("div.grid.g2.mt",
-      h("div.card", cardHead("Temperature alerts", "thermo"), h("div.sub", "A Windows notification pops up when something gets too hot."),
+      h("div.card", { "data-anchor": "alerts" }, cardHead("Temperature alerts", "thermo"), h("div.sub", "A Windows notification pops up when something gets too hot."),
         h("div.opt", h("div.t", "Alerts on"), switchEl(a.enabled, v => { a.enabled = v; })),
         h("div.stack.mt", { style: { gap: "14px" } },
           sliderRow("CPU", 60, 105, a.cpu_temp_max, 1, "°C", v => { a.cpu_temp_max = v; }),
           sliderRow("GPU", 60, 100, a.gpu_temp_max, 1, "°C", v => { a.gpu_temp_max = v; }),
           sliderRow("Drives", 40, 80, a.drive_temp_max, 1, "°C", v => { a.drive_temp_max = v; }))),
-      overlayCard(ov),
       h("div.card", cardHead("General", "gear"), ...general, ...technical),
       h("div.card", cardHead("About", "info"), ...about, creditsList()),
       helpCard()));

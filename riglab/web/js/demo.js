@@ -2,7 +2,7 @@
    browser (no Python). Lets you click through and tweak the design without running RigLab. */
 "use strict";
 
-/* Overlay settings in preview mode, shared by the main window and overlay.html (same browser storage). */
+/* Overlay settings in preview mode (kept in browser storage). */
 const DemoOverlay = {
   KEY: "riglab.demo.overlay",
   def: { enabled: true, stats: ["fps"], preset: "minimal", layout: "horizontal", size: "m", opacity: 0.85, text_color: "theme", fps_color: "auto",
@@ -31,49 +31,12 @@ const DemoOverlay = {
   status() {
     const o = this.load(), ex = o.game === "exclusive";
     return { enabled: !!o.enabled, visible: !!o.enabled && !o.hidden && !ex, hidden_by_key: !!o.hidden, editing: !!(o.editing || o.holding), fullscreen: o.game,
+      minimised: !!o.minimised, running: !!o.enabled,
       app: "Game.exe", hotkey_ok: true, repairs: 0, last_error: null,
       notice: ex ? "Game.exe is running in exclusive fullscreen, so Windows doesn't let anything draw on top of it - including RigLab's overlay. In the game's display settings, choose Borderless or Windowed fullscreen and the overlay will show." : null };
   },
 };
 
-/* Fake backend for overlay.html in preview mode: a pretend screen the size of the browser window. */
-class DemoOverlayApi {
-  constructor() { this.t0 = Date.now(); }
-  async overlay_config() { return DemoOverlay.config(); }
-  async overlay_data() {
-    const t = (Date.now() - this.t0) / 1000, w = (a, b, p) => a + b * Math.sin(t / p);
-    const fps = w(142, 18, 3.1);
-    return { cpu_temp: w(62, 6, 9), gpu_temp: w(58, 7, 11), cpu_load: w(38, 12, 5), gpu_load: w(91, 6, 4), ram: w(47, 2, 30), cpu_clock: w(4950, 120, 2), gpu_clock: w(2610, 60, 3),
-      fps: { state: "ok", fps, low1: fps * 0.72, frametime: 1000 / fps, app: "Game.exe" } };
-  }
-  async overlay_lock(on) { return this.overlay_edit(!on); }
-  async overlay_edit(on) { const o = DemoOverlay.load(); o.editing = !!on; if (on) o.minimised = false; DemoOverlay.save(o); return { edit: !!on }; }
-  async overlay_minimise(on) { const o = DemoOverlay.load(); o.minimised = !!on; if (on) o.editing = false; DemoOverlay.save(o); return { minimised: o.minimised }; }
-  async overlay_log(m) { console.warn("overlay:", m); return true; }
-  setGameMode(m) { const o = DemoOverlay.load(); o.game = m; DemoOverlay.save(o); }
-  gameMode() { return DemoOverlay.load().game || "borderless"; }
-  setHolding(on) { const o = DemoOverlay.load(); if (!!o.holding === !!on) return; o.holding = !!on; if (on) o.minimised = false; DemoOverlay.save(o); }
-  toggleHidden() { const o = DemoOverlay.load(); o.hidden = !o.hidden; DemoOverlay.save(o); }
-  async overlay_fit() { return true; }
-  async overlay_track() { return { state: null }; }
-  /* same rules as core/overlay.py: keep inside the screen; snap to the nearest corner if snapping is on */
-  demoPos(w, h, W, H) {
-    const o = DemoOverlay.load(), M = 12;
-    if (o.x == null || o.y == null) {
-      const c = o.corner || "top-left";
-      return { x: c.includes("left") ? M : W - w - M, y: c.includes("top") ? M : H - h - M };
-    }
-    return { x: Math.min(Math.max(o.x, 0), Math.max(0, W - w)), y: Math.min(Math.max(o.y, 0), Math.max(0, H - h)) };
-  }
-  demoDrop(x, y, w, h, W, H) {
-    const o = DemoOverlay.load();
-    if (o.snap) {
-      o.corner = (y + h / 2 < H / 2 ? "top" : "bottom") + "-" + (x + w / 2 < W / 2 ? "left" : "right");
-      o.x = o.y = null;
-    } else { o.x = Math.min(Math.max(x, 0), Math.max(0, W - w)); o.y = Math.min(Math.max(y, 0), Math.max(0, H - h)); }
-    DemoOverlay.save(o);
-  }
-}
 
 class DemoApi {
   constructor() {
@@ -162,7 +125,7 @@ class DemoApi {
     return v.toFixed(1) + " " + d.unit;
   }
   // ------------------------------------------------------------ api
-  async info() { const ui = this.uiCfg ||= this._uiLoad(); return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.11.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
+  async info() { const ui = this.uiCfg ||= this._uiLoad(); return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.12.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
   status() { return { "LibreHardwareMonitor": "active", "liquidctl (fan hubs / AIOs)": "active", "NVIDIA NVML": "active", psutil: "active" }; }
   async snapshot() {
     this.sample(0);
@@ -298,7 +261,8 @@ class DemoApi {
       orders: ["RGB", "RBG", "GRB", "GBR", "BRG", "BGR"], exe: "C:\\Program Files\\OpenRGB\\OpenRGB.exe", port: 6743,
       setup: devs.flatMap(d => d.zones.filter(z => z.unconfirmed).map(z => ({ key: d.key, zone: z.name }))),
       boot: starting ? { state: "none", say: "Windows just started, so RigLab is checking for your lights (this can take up to a minute)." }
-        : { state: "good", say: `After the restart RigLab checked for your lights, found ${devs.length} devices and reapplied your last effect.` } };
+        : { state: "good", say: `When RigLab started, it checked for your lights, found ${devs.length} devices and reapplied your last effect.` },
+      last_effect: this.lastEffect || "Rainbow sweep" };
   }
   gtCaps() {
     return this.gt ||= { core_offset: { min: -500, max: 500, step: 5, value: 0, default: 0, label: "Core clock offset", unit: "MHz", help: "Shifts the whole boost curve. Raise in +15-30 MHz steps and test each step." },
@@ -375,7 +339,7 @@ class DemoApi {
   async gpu_runs() { return this.gtRuns ||= []; }
   async gpu_run_edit(id, label, score, del) { const r = this.gtRuns || []; const x = r.find(q => q.id === id); if (x && del) r.splice(r.indexOf(x), 1); else if (x && score) x.stats.score = +score; return r; }
   async ui_set(v) {
-    const ui = (this.uiCfg ||= this._uiLoad()), names = { theme: "theme", accent: "highlight colour", text_scale: "text size", reduce_motion: "animations" };
+    const ui = (this.uiCfg ||= this._uiLoad()), names = { theme: "theme", accent: "highlight colour", text_scale: "text size", reduce_motion: "animations", pins: "tools pinned to Home" };
     const changed = Object.keys(v).filter(k => k in names && ui[k] !== v[k]);
     if (changed.length && !v._undo) this._log("appearance", "Look changed: " + changed.map(k => names[k]).join(", "),
       Object.fromEntries(changed.map(k => [k, ui[k] ?? null])), Object.fromEntries(changed.map(k => [k, v[k]])), true, "you", "Low", "appearance");
@@ -386,6 +350,8 @@ class DemoApi {
   async light_pause(on) { this.lightPaused = on; return on; }
   async light_pick_exe() { return this.light_state(); }
   async light_set(s) {
+    const cur = this.lightState || {};
+    if (s.effect === "Off" && cur.effect && cur.effect !== "Off") this.lastEffect = cur.effect;
     const before = Object.assign({}, this.lightState);
     Object.assign(this.lightState, s);
     if (JSON.stringify(before) !== JSON.stringify(this.lightState)) this._log("lighting", "Lights: " + (this.lightState.effect || "changed"), { state: before }, { state: Object.assign({}, this.lightState) }, true, "you", "Low", "lighting");
@@ -602,13 +568,18 @@ class DemoApi {
   async netspeed_status() {
     const n = this.net;
     if (!n) return { running: false, result: null };
-    const steps = [["Checking your connection", 0.8], ["Finding the nearest test server", 0.6], ["Measuring ping, jitter and packet loss", 1.6], ["Testing download speed", 2.2], ["Testing upload speed", 2]];
+    const steps = [["Checking your connection", 0.8], ["Finding the nearest test server", 0.6], ["Measuring ping, jitter and packet loss", 1.6], ["Testing download speed", 3.5], ["Testing upload speed", 3]];
     const el = (Date.now() - n.t0) / 1000, tot = steps.reduce((a, s) => a + s[1], 0);
     let acc = 0, i = 0; for (; i < steps.length && el >= acc + steps[i][1]; i++) acc += steps[i][1];
     const done = n.cancelled || i >= steps.length || (n.offline && i >= 1);
     const partial = {};
     if (!n.offline) { if (i > 2) Object.assign(partial, { ping: 14, jitter: 2.3, loss: 0 }); if (i > 3) partial.download = 286.4; if (i > 4) partial.upload = 41.2; }
-    if (!done) return { running: true, step: steps[i][0], index: i + 1, count: steps.length, progress: Math.min(.99, el / tot), eta_text: "less than a minute left", partial };
+    let phase = i === 2 ? "ping" : i === 3 ? "download" : i === 4 ? "upload" : null;
+    if (!done && (i === 3 || i === 4)) {                 // live speed: ramps up, then wobbles around the final value
+      const k = (el - acc) / steps[i][1], top = i === 3 ? 286.4 : 41.2;
+      partial.live = { phase, mbps: Math.round(top * (1 - Math.exp(-4 * k)) * (0.94 + 0.08 * Math.sin(el * 9)) * 10) / 10 };
+    }
+    if (!done) return { running: true, step: steps[i][0], index: i + 1, count: steps.length, progress: Math.min(.99, el / tot), eta_text: "less than a minute left", partial, phase };
     if (n.cancelled) return { running: false, cancelled: true, result: null };
     if (!n.result) {
       n.result = n.offline ? { time: Date.now() / 1000, offline: true, summary: { state: "bad", say: "No internet connection. Connect to the internet and try again." } }
@@ -689,7 +660,7 @@ class DemoApi {
     return { ok: true, msg: "Put back the way it was" };
   }
   async settings() { this.cfg.overlay = DemoOverlay.load(); return this.cfg; }
-  async overlay_config() { return DemoOverlay.config(); }
+  async overlay_preview() { return { png: null }; }     // the page draws its own look-alike in preview mode
   async overlay_set(v) {
     const before = DemoOverlay.load(), o = DemoOverlay.set(v || {});
     if (!v._undo && ["stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "move_hold", "enabled", "fps_color"].some(k => JSON.stringify(before[k]) !== JSON.stringify(o[k])))
@@ -701,11 +672,21 @@ class DemoApi {
   async overlay_status() { return DemoOverlay.status(); }
   async overlay_minimise(on) { const o = DemoOverlay.load(); o.minimised = !!on; if (on) o.editing = false; DemoOverlay.save(o); return { minimised: o.minimised }; }
   async overlay_corner(c) { const o = DemoOverlay.load(); o.corner = c; o.x = o.y = null; DemoOverlay.save(o); return true; }
-  async overlay_fit() { return true; }
   async save_settings(c) { this.cfg = c; return true; }
   async log_toggle() { this.logging = !this.logging; return { active: this.logging, path: "sensors_20261114.csv" }; }
   async open_folder() { return true; }
   async startup_notes() { return [{ kind: "info", text: "Detected: RAM speed changed: 4800 MT/s → 6000 MT/s" }]; }
+  async startup_log() {
+    const t = Date.now() / 1000;
+    return { items: [
+      { time: t - 40, kind: "reapply", level: "info", text: "Reapplied your last lighting effect to Logitech G560 Lightsync Speakers, SteelSeries Apex 3, Corsair Lighting Node Pro." },
+      { time: t - 41, kind: "found", level: "info", text: "Try 3 (fresh scan): found 3 - Logitech G560 Lightsync Speakers, SteelSeries Apex 3, Corsair Lighting Node Pro." },
+      { time: t - 52, kind: "found", level: "warn", text: "Try 2 (check): found 1 - Corsair Lighting Node Pro. Still missing: Logitech G560 Lightsync Speakers, SteelSeries Apex 3." },
+      { time: t - 56, kind: "found", level: "warn", text: "Try 1 (check): found 1 - Corsair Lighting Node Pro. Still missing: Logitech G560 Lightsync Speakers, SteelSeries Apex 3." },
+      { time: t - 57, kind: "scan", level: "info", text: "Looking for your lights because RigLab started. Expecting: Logitech G560 Lightsync Speakers, SteelSeries Apex 3, Corsair Lighting Node Pro." },
+      { time: t - 60, kind: "start", level: "info", text: "RigLab started by Start with Windows. Windows started 1 min ago (first start since then). Start with Windows: on." }],
+      text: "(preview) start-up log" };
+  }
   async oc_state() {
     const inv = await this.inventory();
     const profile = { cpu: { name: "AMD Ryzen 7 7800X3D 8-Core Processor", vendor: "amd", series: 7000, x3d: true, platform: "AM5", zen: 4, boost_override: false, pbo: true },

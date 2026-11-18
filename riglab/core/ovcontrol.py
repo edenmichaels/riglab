@@ -135,8 +135,8 @@ class OverlayController:
             w, h = frame.size
             # while editing, a drag bar sits above the panel: move the window up by that much so the panel itself
             # stays exactly where it was (saved x/y always mean "where the panel's box starts")
-            panel = frame.regions.get("panel")
-            self.offset = (panel[1] - ovrender.PAD) if (panel and self.editing) else 0
+            panel, bar = frame.regions.get("panel"), frame.regions.get("bar")
+            self.offset = (panel[1] - ovrender.PAD) if (panel and bar and self.editing) else 0   # (normal frames: panel at PAD)
             if self.dragging and self.pos:
                 x, y = self.pos                         # Windows is moving it: don't fight the mouse
             elif o.get("x") is not None and o.get("y") is not None:

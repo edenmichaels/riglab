@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "RigLab"
-APP_VERSION = "3.11.0"
+APP_VERSION = "3.12.0"
 
 
 def app_dir() -> Path:
@@ -60,7 +60,7 @@ DEFAULTS: dict = {
                 "snap": False, "hotkey": ""},
     "ui": {"theme": "dark", "accent": "cyan", "start_page": "home", "view": "simple",    # view: simple | advanced
            "preset": None,                                                           # last preset applied on Home
-           "text_scale": 1, "tour_done": False, "tips_hidden": [], "reduce_motion": False},
+           "text_scale": 1, "tour_done": False, "tips_hidden": [], "reduce_motion": False, "pins": None},
     "health": {"weekly": False},
     # None = not decided yet: on the first start of 3.11 RigLab turns it on (needed for the after-boot lighting rescan)
     "startup": {"with_windows": None},

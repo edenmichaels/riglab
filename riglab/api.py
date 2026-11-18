@@ -70,6 +70,8 @@ class Api:
         animation changes go in Change history (clicking through several themes = one entry, one Undo)."""
         ui = self._cfg.data.setdefault("ui", {})
         new = ui_values(values)
+        if (values or {}).get("_undo") and "pins" in values and values["pins"] is None:
+            new["pins"] = None                           # undo back to "never chosen" (= the default pins)
         watched = {k: v for k, v in new.items() if k in APPEARANCE_KEYS and ui.get(k) != v}
         before = {k: ui.get(k) for k in watched}
         ui.update(new)
@@ -610,7 +612,8 @@ class Api:
                 "palettes": list(fx.PALETTES),
                 "fan_types": CORSAIR_LED_COUNTS, "orders": list(ORDERS), "exe": h.exe(), "port": PORT,
                 "setup": [{"key": d["key"], "zone": z["name"]} for d in devs for z in d["zones"] if z.get("unconfirmed")],
-                "boot": boot_words(getattr(self._app, "boot_info", None))}
+                "boot": boot_words(getattr(self._app, "lightwatch", None)),
+                "last_effect": e.L.get("last_effect") or "Rainbow sweep"}
 
     def light_reset(self):
         """Called every time the Lighting page opens."""
@@ -647,6 +650,8 @@ class Api:
 
     def light_set(self, state):
         before = dict(self._light.L["state"])
+        if (state or {}).get("effect") == "Off" and before.get("effect") not in (None, "Off"):
+            self._light.L["last_effect"] = before.get("effect")     # so "Lights on" on Home brings it back
         self._light.set_state(**state)
         after = dict(self._light.L["state"])
         if after != before:
@@ -687,6 +692,14 @@ class Api:
                 e.set_test(key, z["name"], None)
         threading.Thread(target=clear, daemon=True).start()
         return True
+
+    def startup_log(self):
+        """Advanced view -> RigLab setup: what RigLab did at start-up and in the background (lighting scans,
+        wake from sleep, devices plugged in), newest first."""
+        ev = getattr(self._app, "events", None)
+        if ev is None:
+            return {"items": [], "text": "Nothing logged yet."}
+        return {"items": ev.items(200), "text": ev.text(200)}
 
     def light_rescan(self):
         """Rescan button: a real fresh hardware scan (restarts RigLab's lighting service), then reapply the effect."""
@@ -1265,16 +1278,24 @@ class Api:
             ctx.data["ping"], ctx.data["jitter"] = netspeed.ping_stats(times)
             return []
 
+        def live(phase):
+            return lambda mbps: ctx_ref[0].data.__setitem__("live", {"phase": phase, "mbps": mbps})
+        ctx_ref = [None]
+
         def down(ctx):
+            ctx_ref[0] = ctx
             if not ctx.data.get("offline"):
-                r = netspeed.transfer("down", cancelled=ctx.cancelled)
+                r = netspeed.transfer("down", cancelled=ctx.cancelled, on_rate=live("download"))
                 ctx.data["download"], ctx.data["down_bytes"] = r["mbps"], r["bytes"]
+            ctx.data.pop("live", None)
             return []
 
         def up(ctx):
+            ctx_ref[0] = ctx
             if not ctx.data.get("offline"):
-                r = netspeed.transfer("up", cancelled=ctx.cancelled)
+                r = netspeed.transfer("up", cancelled=ctx.cancelled, on_rate=live("upload"))
                 ctx.data["upload"], ctx.data["up_bytes"] = r["mbps"], r["bytes"]
+            ctx.data.pop("live", None)
             return []
 
         def finish(job):
@@ -1300,7 +1321,8 @@ class Api:
         if not j:
             return {"running": False, "result": None}
         st = j.status()
-        st["partial"] = {k: v for k, v in (j.ctx.data if j.ctx else {}).items() if k in ("download", "upload", "ping", "jitter", "loss", "offline")}
+        st["partial"] = {k: v for k, v in (j.ctx.data if j.ctx else {}).items() if k in ("download", "upload", "ping", "jitter", "loss", "offline", "live")}
+        st["phase"] = (st["partial"].get("live") or {}).get("phase") or {2: "ping", 3: "download", 4: "upload"}.get(st.get("index", 0) - 1) if st.get("running") else None
         return st
 
     def netspeed_cancel(self):
@@ -1358,9 +1380,9 @@ class Api:
                 f"Task Scheduler didn't accept it: {msg}"}
 
     # ------------------------------------------------------------------ change history
-    def _log(self, kind, title, before=None, after=None, undo=True, source="you", risk="Low", detail="", ok=True):
+    def _log(self, kind, title, before=None, after=None, undo=True, source="you", risk="Low", detail="", ok=True, merge=None):
         try:
-            return self._changes.add(kind, title, before, after, undo=undo, source=source, risk=risk, detail=detail, ok=ok)
+            return self._changes.add(kind, title, before, after, undo=undo, source=source, risk=risk, detail=detail, ok=ok, merge=merge)
         except Exception:  # noqa: BLE001
             log.exception("change history")
             return None
@@ -1505,32 +1527,39 @@ def _size(b):
         b /= 1024
 
 
-def boot_words(b):
-    """One plain line for the Lights page about the after-restart check (None when there's nothing to say)."""
-    if not b or not b.get("first_since_boot"):
+def boot_words(w):
+    """One plain line for the Lights page about the automatic device check (None when there's nothing to say)."""
+    if w is None:
         return None
-    if b.get("running"):
-        return {"state": "none", "say": "Windows just started, so RigLab is checking for your lights (this can take up to a minute)."}
-    r = b.get("rescan")
-    if not r:
+    if getattr(w, "busy", False):
+        return {"state": "none", "say": "RigLab is checking for your lights (this can take up to two minutes after start-up)."}
+    r = getattr(w, "last", None)
+    if not r or r.get("skipped"):
         return None
     n = len(r.get("found") or [])
+    when = {"startup": "When RigLab started", "wake": "After the PC woke up", "device": "When a device was plugged in",
+            "manual": "After your rescan"}.get(r.get("reason"), "Last check")
     if r.get("missing"):
-        return {"state": "warn", "say": f"After the restart RigLab found {n} lighting device{'s' if n != 1 else ''} but not: "
-                f"{', '.join(r['missing'])}. Check it's plugged in, then press Rescan."}
+        extra = " ".join(b["say"] for b in r.get("blocked") or []) or "Check it's plugged in - RigLab keeps watching for it."
+        return {"state": "warn", "say": f"{when}, RigLab found {n} lighting device{'s' if n != 1 else ''} but not {', '.join(r['missing'])}. {extra}"}
     again = " and reapplied your last effect" if r.get("reapplied") else ""
-    return {"state": "good", "say": f"After the restart RigLab checked for your lights, found {n} device{'s' if n != 1 else ''}{again}."}
+    return {"state": "good", "say": f"{when}, RigLab checked for your lights, found {n} device{'s' if n != 1 else ''}{again}."}
 
 
 OVERLAY_KEYS = ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color", "move_hold")
 
 
-APPEARANCE_KEYS = {"theme": "theme", "accent": "highlight colour", "text_scale": "text size", "reduce_motion": "animations"}
+APPEARANCE_KEYS = {"theme": "theme", "accent": "highlight colour", "text_scale": "text size", "reduce_motion": "animations",
+                   "pins": "tools pinned to Home"}
 SETTING_NAMES = {"alerts": "too-hot warnings", "logging": "logging", "openrgb": "lighting service", "liquidctl": "fan hubs",
                  "minimize_to_tray": "keep running", "poll_interval_ms": "sensor refresh", "start_minimized": "start hidden"}
 THEME_IDS = ("dark", "light", "system", "dracula", "nord", "catppuccin", "gruvbox", "solarized", "tokyo", "onedark", "contrast")
 ACCENTS = ("theme", "cyan", "violet", "emerald", "amber", "crimson", "ocean", "mono")
 TEXT_SCALES = (0.8, 1, 1.25, 1.5)
+
+
+MAX_PINS = 4
+DEFAULT_PINS = ["netspeed", "storage", "fans", "overlay"]
 
 
 def ui_values(values: dict) -> dict:
@@ -1553,6 +1582,8 @@ def ui_values(values: dict) -> dict:
             out[k] = v
         elif k == "tips_hidden" and isinstance(v, list):
             out[k] = [str(x)[:40] for x in v][:100]
+        elif k == "pins" and isinstance(v, list):          # tools pinned to Home (up to 4, no repeats)
+            out[k] = list(dict.fromkeys(str(x)[:40] for x in v if isinstance(x, str) and x.strip()))[:MAX_PINS]
     return out
 
 

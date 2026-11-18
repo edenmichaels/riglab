@@ -249,14 +249,22 @@ def http_latency(server: str = SERVER, n: int = 8, cancelled=lambda: False) -> l
     return out
 
 
+def live_rate(samples: list[tuple[float, int]], now: float, window: float = 1.0) -> float:
+    """Megabits per second over the last `window` seconds (what the gauge's needle shows during the test)."""
+    got = sum(b for t, b in samples if now - window < t <= now)
+    return round(got * 8 / window / 1e6, 2)
+
+
 def transfer(direction: str, server: str = SERVER, seconds: float = SECONDS, streams: int = STREAMS,
-             cancelled=lambda: False, clock=time.perf_counter) -> dict:
-    """Download or upload with several connections for `seconds`. Returns {"mbps", "bytes"}."""
+             cancelled=lambda: False, clock=time.perf_counter, on_rate=None) -> dict:
+    """Download or upload with several connections for `seconds`. Returns {"mbps", "bytes"}.
+    on_rate(mbps) is called about 4 times a second with the current speed (for the live gauge)."""
     cap = MAX_DOWN if direction == "down" else MAX_UP
     samples: list[tuple[float, int]] = []
     lock = threading.Lock()
     total = [0]
     cap_at = []
+    emitted = [0.0]
     start = clock()
     end_at = start + seconds
     stop = threading.Event()
@@ -268,6 +276,13 @@ def transfer(direction: str, server: str = SERVER, seconds: float = SECONDS, str
             if total[0] >= cap and not cap_at:
                 cap_at.append(clock())
                 stop.set()
+            now = clock()
+            if on_rate and now - emitted[0] >= 0.25:
+                emitted[0] = now
+                try:
+                    on_rate(live_rate(samples, now, min(1.0, max(0.25, now - start))))
+                except Exception:  # noqa: BLE001
+                    pass
 
     def worker():
         size = 1_000_000

@@ -3,13 +3,14 @@
 "use strict";
 
 const TOUR = [
-  { sel: "#navbox", title: "The menu", text: "Everything in RigLab is here. PC Health shows how your PC is doing. Tools has ways to make it faster, quieter or tidier." },
+  { sel: "#navbox", title: "The menu", text: "Five places: Home, PC Health, Lighting, Tools and Settings. Tools has everything else - tap a tool to open it." },
+  { sel: ".gsearch", title: "Search", text: "Type what you want, like 'fans' or 'speed test', to jump straight there." },
   { sel: ".topbar .seg", title: "Simple or Advanced", text: "Simple view uses plain words and hides risky settings. Advanced view shows every reading and setting. You can switch any time - nothing is lost." },
   { sel: ".aa", title: "Text size", text: "Make everything bigger or smaller." },
-  { sel: ".hdial", title: "Your health score", text: "A score out of 100 for your PC. Green is good, yellow is worth checking, red needs fixing. Click it to see the full report." },
-  { sel: ".start-here", title: "Start here", text: "Not sure what to do? Pick what's bothering you and RigLab takes you to the right place." },
+  { sel: ".gauge2.ring", title: "Your health score", text: "A score out of 100 for your PC. Green is good, yellow is worth checking, red needs fixing. Click it to see the full report." },
+  { sel: ".home-side", title: "Lights and pinned tools", text: "Turn your lights on or off here. Tools you pin (with the star in Tools) show up here too." },
   { sel: ".preset-row", title: "Presets", text: "Set up your whole PC for gaming, quiet, work and more. You always see exactly what will change before anything happens." },
-  { sel: '.nav[data-page="history"]', title: "Change history", text: "Everything RigLab changes is listed here, with an Undo button. You can always go back." },
+  { sel: ".undo-split", title: "Undo", text: "Undoes the last change RigLab made. The arrow lists recent changes - you can always go back." },
 ];
 
 const Tour = {
@@ -60,7 +61,11 @@ const Tour = {
 
 // ------------------------------------------------------------------ first-use tips
 const TIPS = {
-  home: "Your health score is in the middle. Below it, Start here and Presets help you get things done in one or two clicks.",
+  home: "Your health score is in the middle. Presets set up your whole PC in one go. Pin your favourite tools here with the star in Tools.",
+  tools: "Every tool in one place. Tap a tool to open it, and the star to pin it to Home.",
+  netspeed: "Press GO to test your internet. It takes about 40 seconds and uses some data.",
+  overlay: "Shows FPS and temperatures on top of your games. Clicks go straight through to the game.",
+  themes: "Pick how RigLab looks. Changes apply straight away.",
   dashboard: "Run a quick check for a score, or a full check (it takes longer) for a virus scan and Windows file checks too. Fix it buttons repair what they can.",
   crashes: "RigLab reads Windows' own crash records and explains what probably went wrong. Nothing is changed here.",
   tweaks: "Each switch has an (i) button that explains what it does. Every change can be undone in Change history.",
@@ -70,7 +75,7 @@ const TIPS = {
   lighting: "Pick a colour or effect for every RGB light in your PC.",
   benchmark: "Close games and other apps first, then run the speed test. Run it again after a change to see if it helped.",
   history: "Everything RigLab changes is listed here. Press Undo to put something back the way it was.",
-  settings: "Change the theme, text size and the in-game overlay here. You can also replay the walkthrough.",
+  settings: "Text size, warnings and start-up options. Themes have their own tab at the top.",
   sensors: "Every reading your hardware reports. Click a row to see its graph.",
   hardware: "Full details of every part in your PC, and how healthy your drives are.",
   stress: "A stress test runs your PC at full power to check it's stable. RigLab stops it by itself if anything gets too hot.",

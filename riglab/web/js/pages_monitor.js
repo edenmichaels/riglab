@@ -145,9 +145,17 @@ App.pages.dashboard = {
       el.append(healthTop());
       this.lightsBox = h("div");
       this.overall = h("div.row", { style: { gap: "12px" } });
-      el.append(h("div.card.mt", cardHead("Right now", "pulse", this.overall), h("div.small.muted", "These readings update every second."), this.lightsBox,
-        h("div.mt", colourKey())));
-      el.append(h("div.card.mt", cardHead("Things you can do", "rocket"), h("div.row.wrap", { style: { gap: "10px" } },
+      // four live dials (the shared Gauge): one key fact each; every other reading is behind "Show details"
+      this.live = [
+        ["cpu_temp", "Processor", "°C", STOPS.temp, 100], ["gpu_temp", "Graphics", "°C", STOPS.temp, 100],
+        ["cpu_load", "Processor use", "%", null, 100], ["gpu_load", "Graphics use", "%", null, 100]].map(([k, label, unit, stops, max]) => {
+        const g = Gauge.create({ kind: "arc", size: 130, unit, stops, max, label });
+        return { k, g, el: h("div.live-g", g.el, h("div.small.muted", label)) };
+      });
+      el.append(h("div.card.mt", { "data-anchor": "live" }, cardHead("Right now", "pulse", this.overall, colourKey()),
+        h("div.live-gauges", this.live.map(x => x.el)),
+        details("Show details", h("div.small.muted", "These readings update every second."), this.lightsBox)));
+      el.append(details("Things you can do", h("div.row.wrap", { style: { gap: "10px" } },
         actionBtn("tweaks.recommended", async () => { const r = await App.api.tweaks_recommended(); toast(r.msg, !r.ok); }, { cls: "primary", icon: "rocket" }),
         h("button.btn", { onclick: () => go("tweaks") }, icon("trash"), "Free up space"),
         h("button.btn", { onclick: () => go("cooling") }, icon("fan"), "Change how my fans behave"),
@@ -185,7 +193,7 @@ App.pages.dashboard = {
     };
     this.cpu = mk("cpu", cpuName, "cpu", "Clock");
     this.gpu = mk("gpu", gpuName, "gpu", "Hot spot");
-    el.append(h("div.grid", { style: { gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 440px), 1fr))" } }, this.cpu, this.gpu));
+    el.append(h("div.grid", { "data-anchor": actions ? "live" : null, style: { gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 440px), 1fr))" } }, this.cpu, this.gpu));
 
     const tile = (title, ic, id, extra) => h("div.card", cardHead(title, ic), h("div.stat-big", { id }, "—"),
       extra, h("canvas.spark#" + id + "-spark", { style: { marginTop: "8px" } }));
@@ -234,6 +242,7 @@ App.pages.dashboard = {
     if (this.lightsBox && document.body.contains(this.lightsBox)) {
       PcLights.load();
       this.lightsBox.replaceChildren(...PcLights.rows(snap).map(([k, v, o]) => lightRow(k, v, o || {})));
+      for (const x of this.live || []) x.g.follow(s[x.k]);
       const o = PcLights.overall(snap);
       this.overall.replaceChildren(dot(o.state), h("b", o.say));
     }

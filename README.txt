@@ -1,5 +1,28 @@
-RigLab 3.11.0
+RigLab 3.12.0
 =============
+
+NEW IN 3.12.0
+  Calmer and easier
+  - The menu is now just Home, PC Health, Lighting, Tools and Settings. Tools is a grid of big tiles (tap one to
+    open it, Back takes you to the grid). Themes and RigLab setup are tabs in Settings.
+  - Search box at the top: type "fans", "speed test", "theme"... to jump straight there.
+  - Home shows only the health dial, the main presets (the rest under "More presets"), a lights on/off switch and
+    up to 4 pinned tools. Tap the star on any tool to pin it to Home.
+  - Colour keys open from a small "?" button. Cards show less, with "Show details" for the rest.
+  - The Undo button uses the usual curved-arrow icon, with "Undo last change" on hover.
+  - Fixed the word "null" at the top left.
+  New look for dials
+  - One smooth dial everywhere (health score, internet speed, temperatures, usage): it fills smoothly, counts up,
+    changes colour and glows softly. Settings > Display > Reduce animations turns the movement off.
+  - Speed Test redesigned: a big speedometer with a GO button. Ping, then download, then upload, live.
+  Lighting
+  - Your lights are found by themselves after a restart, a full shutdown, waking from sleep, or plugging a device
+    in - no more pressing Rescan. If another app (like G HUB, SteelSeries GG or iCUE) is holding a device, RigLab
+    says which one and what to do. Settings > RigLab setup (Advanced view) has a start-up log.
+  In-game overlay (rebuilt)
+  - RigLab now draws the overlay itself in a truly see-through window - no white box. Clicks always go through to
+    the game. Tools > Overlay: show/hide, Edit position, shrink to a dot, corners, hotkey, and a live preview of
+    how it looks (presets: Minimal, Standard, Full) before you press Apply.
 
 NEW IN 3.11.0
   In-game overlay (fixed)
@@ -97,7 +120,7 @@ INSTALL (once)
   2. Open the extracted folder and double-click  "Build RigLab Installer.bat".
      The first build takes 5-10 minutes; later builds take 1-2.
      It sets up everything it needs by itself and keeps it in %LOCALAPPDATA%\RigLab-build.
-  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.11.0.exe.
+  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.12.0.exe.
      Double-click it: RigLab installs to Program Files with Start-menu and desktop shortcuts.
 
 UPDATE

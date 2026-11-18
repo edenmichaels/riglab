@@ -2,7 +2,6 @@
 the rebuilt overlay (see-through picture, controller: click-through, edit, drag, lock, dot, hotkey, saved spot,
 monitors and scaling, exclusive fullscreen), overlay settings/presets and the start-up log."""
 import json
-import types
 
 import pytest
 from PIL import Image
@@ -214,7 +213,7 @@ def test_overlay_with_no_background_draws_only_text():
     a = f.image.getchannel("A")
     x0, y0, x1, y1 = f.regions["panel"]
     assert a.getpixel((x0 + 1, y1 - 1)) == 0                                        # no panel at all
-    assert max(a.getdata()) == 255                                                 # but the text is solid
+    assert a.getextrema()[1] == 255                                                # but the text is solid
 
 
 def test_overlay_premultiplied_pixels_for_windows():
@@ -250,7 +249,7 @@ def test_overlay_edit_mode_has_handle_outline_and_buttons():
 def test_overlay_text_colour_and_theme_follow_settings():
     o = dict(ov.migrate({}), text_color="#ff00ff", fps_color="plain")
     img = ovrender.render(o, SAMPLE).image.convert("RGBA")
-    assert (255, 0, 255, 255) in set(img.getdata())
+    assert (255, 0, 255, 255) in {c for _, c in img.getcolors(maxcolors=1 << 20)}
     light = ovrender.colours("light")
     dark = ovrender.colours("dark")
     assert light["panel"] != dark["panel"]
@@ -395,3 +394,16 @@ def test_api_overlay_preview_is_a_picture_of_the_draft():
     r = a.overlay_preview({"preset": "full", "layout": "vertical"}, "light")
     assert r["png"].startswith("data:image/png;base64,") and r["h"] > r["w"]       # full + vertical = tall
     assert a._cfg.data["overlay"]["stats"] == ["fps"]                                # preview doesn't apply anything
+
+
+@pytest.mark.parametrize("size", ["s", "m", "l", "xl"])
+@pytest.mark.parametrize("opacity", [0.0, 0.3, 0.85, 1.0])
+@pytest.mark.parametrize("text", ["theme", "white", "#ff8800"])
+@pytest.mark.parametrize("mode", ["normal", "editing", "dot"])
+def test_every_overlay_option_keeps_the_background_see_through(size, opacity, text, mode):
+    o = dict(ov.apply_preset(ov.migrate({}), "full"), size=size, opacity=opacity, text_color=text, stats=list(ov.STATS))
+    f = ovrender.render(o, SAMPLE, editing=mode == "editing", minimised=mode == "dot", dpi_scale=1.25, history=[7, 8, 6, 9] * 5)
+    assert corners_clear(f.image)
+    a = f.image.getchannel("A")
+    w, h = f.size
+    assert all(a.getpixel((x, y)) == 0 for x in range(w) for y in (0, h - 1))       # nothing along the top/bottom edge

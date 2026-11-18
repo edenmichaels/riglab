@@ -80,11 +80,16 @@ def set_thread_dpi_aware():
         pass
 
 
+_seq = [0]
+
+
 class MsgWindow:
     """handler(win, msg, wparam, lparam) -> int | None (None = Windows' default handling)."""
 
     def __init__(self, class_name: str, title: str, handler, ex_style: int = 0, style: int = WS_POPUP, on_ready=None):
-        self.class_name, self.title, self.handler = class_name, title, handler
+        # a new window class each time: a restarted window must never reuse an old (freed) message handler
+        _seq[0] += 1
+        self.class_name, self.title, self.handler = f"{class_name}{_seq[0]}", title, handler
         self.ex_style, self.style, self.on_ready = ex_style, style, on_ready
         self.hwnd = None
         self.tid = None
@@ -170,6 +175,10 @@ class MsgWindow:
             log.exception("%s loop", self.class_name)
         finally:
             self.hwnd = None
+            try:
+                user32.UnregisterClassW(self.class_name, kernel32.GetModuleHandleW(None))
+            except Exception:  # noqa: BLE001
+                pass
 
     def post(self, fn):
         """Run fn() on the window's thread (returns straight away)."""
