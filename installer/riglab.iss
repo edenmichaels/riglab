@@ -3,7 +3,7 @@
   #define AppVer "0.0.0"
 #endif
 #ifndef DistDir
-  #error DistDir not set - run "Build RigLab Installer.bat"
+  #error DistDir not set - run installer/build.py
 #endif
 
 [Setup]
