@@ -1,4 +1,4 @@
-"""Builds RigLab-Setup-<version>.exe. Started by "Build RigLab Installer.bat" - don't run it directly.
+"""Builds RigLab-Setup-<version>.exe. Run by GitHub Actions (.github/workflows/release.yml).
 
 Everything heavy happens in %LOCALAPPDATA%\\RigLab-build (outside Dropbox/OneDrive, reused next time):
   1. bundled tools: LibreHardwareMonitor (sensors), PresentMon (FPS), OpenRGB (RGB drivers)

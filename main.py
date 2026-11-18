@@ -1,6 +1,6 @@
 """RigLab - hardware diagnostics, benchmarks, stress tests, RGB, fans and overclocking for Windows.
 
-Installed RigLab is RigLab.exe (built by "Build RigLab Installer.bat"). Options:
+Installed RigLab is RigLab.exe (built by installer/build.py on GitHub). Options:
   --minimized   start in the tray (used by "Start with Windows")
   --debug       open the browser dev tools
   --weekly-check  run a quick health check and show the score (used by the optional weekly task)

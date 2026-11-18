@@ -96,4 +96,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: gh release create "$GITHUB_REF_NAME" Installer/RigLab-Setup-* --draft --generate-notes --title "RigLab ${{ steps.ver.outputs.version }}"
+        # if the release was already made on github.com (e.g. "Draft a new release" with a new tag), just attach
+        # the installer to it; otherwise make a draft release with it
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" Installer/RigLab-Setup-* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" Installer/RigLab-Setup-* --draft --generate-notes --title "RigLab ${{ steps.ver.outputs.version }}"
+          fi
