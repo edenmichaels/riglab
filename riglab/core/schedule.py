@@ -65,3 +65,39 @@ def is_scheduled() -> bool | None:
         return None
     ok, _ = _run(["schtasks", "/Query", "/TN", TASK])
     return ok
+
+
+# ------------------------------------------------------------------ start RigLab with Windows
+# A logon task (not the Run key): RigLab needs administrator rights, and a Run-key entry would show a permission
+# prompt at every sign-in. The task starts RigLab in the tray, 15 seconds after you sign in.
+AUTOSTART_TASK = r"RigLab\Start RigLab"
+
+
+def autostart_args(cmd: list[str], user: str) -> list[str]:
+    tr = " ".join(f'"{c}"' for c in cmd) + " --minimized"
+    if len(tr) > 261:
+        raise ValueError("RigLab's folder path is too long for Task Scheduler")
+    return ["schtasks", "/Create", "/TN", AUTOSTART_TASK, "/TR", tr, "/SC", "ONLOGON", "/RU", user, "/IT",
+            "/RL", "HIGHEST", "/DELAY", "0000:15", "/F"]
+
+
+def current_user() -> str:
+    dom, user = os.environ.get("USERDOMAIN", ""), os.environ.get("USERNAME", "")
+    return f"{dom}\\{user}" if dom and user else user
+
+
+def set_autostart(on: bool) -> tuple[bool, str]:
+    if on:
+        try:
+            return _run(autostart_args(launch_cmd(), current_user()))
+        except ValueError as e:
+            return False, str(e)
+    ok, msg = _run(["schtasks", "/Delete", "/TN", AUTOSTART_TASK, "/F"])
+    return ok or "cannot find" in msg.lower(), msg
+
+
+def autostart_on() -> bool | None:
+    if sys.platform != "win32":
+        return None
+    ok, _ = _run(["schtasks", "/Query", "/TN", AUTOSTART_TASK])
+    return ok

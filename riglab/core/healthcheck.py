@@ -392,7 +392,7 @@ def _kill(p):
 class CheckJob:
     """Runs steps one after another on a thread. status() is polled by the screen every second."""
 
-    def __init__(self, kind: str, steps: list[Step], online: bool = True, clock=time.monotonic):
+    def __init__(self, kind: str, steps: list[Step], online: bool = True, clock=time.monotonic, finish=None):
         self.kind, self.steps, self.online, self.clock = kind, steps, online, clock
         self.cancel_flag = threading.Event()
         self.items: list[dict] = []
@@ -405,6 +405,8 @@ class CheckJob:
         self.proc = None
         self.thread: threading.Thread | None = None
         self.on_done: Callable[[dict], None] | None = None
+        self.finish = finish          # builds the result from the job (default: a health score from the items)
+        self.ctx: Ctx | None = None
 
     # -- control
     def start(self, background: bool = True):
@@ -426,7 +428,7 @@ class CheckJob:
         return self.started is not None and self.finished is None
 
     def _run(self):
-        ctx = Ctx(self, online=self.online)
+        ctx = self.ctx = Ctx(self, online=self.online)
         try:
             for i, st in enumerate(self.steps):
                 if self.cancel_flag.is_set():
@@ -447,12 +449,17 @@ class CheckJob:
         except Exception as e:  # noqa: BLE001
             log.exception("health job")
             self.error = str(e)
-        self.finished = self.clock()
         cancelled = self.cancel_flag.is_set()
-        if cancelled:
-            self.result = None
-        else:
-            self.result = health.result(self.items, kind=self.kind)
+        result = None
+        if not cancelled:          # work out the result BEFORE marking the job finished, so a screen never sees
+            try:                   # "finished" with no result yet
+                result = self.finish(self) if self.finish else health.result(self.items, kind=self.kind)
+            except Exception as e:  # noqa: BLE001
+                log.exception("job finish")
+                self.error = str(e)
+        self.result = result
+        self.finished = self.clock()
+        if not cancelled:
             if self.on_done:
                 try:
                     self.on_done(self.result)

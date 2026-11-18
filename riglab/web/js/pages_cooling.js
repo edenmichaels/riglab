@@ -16,7 +16,7 @@ App.pages.cooling = {
     el.append(this.top);
     this.list = h("div.fan-list");
     this.editor = h("div.card");
-    const editorGrid = h("div.grid", { style: { gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 380px), 1fr))", alignItems: "start" } },
+    const editorGrid = h("div.grid", { "data-anchor": "curves", style: { gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 380px), 1fr))", alignItems: "start" } },
       h("div.card", cardHead("Fans & pumps", "fan"), this.list), this.editor);
     const safety = h("div.card.mt", cardHead(S ? "Safety rules (always on)" : "Safety rules (always on)", "info"), h("div.small.muted", { style: { lineHeight: "1.8" } }, S
       ? ["• Fans never spin slower than 20%, and pumps never slower than 60%.", h("br"), "• If RigLab loses a temperature reading, or something passes 90°C, the fans go to full speed.", h("br"), "• When RigLab closes, your fans go back to how they were before."]
@@ -24,7 +24,8 @@ App.pages.cooling = {
         "• When RigLab closes, motherboard fans go back to BIOS control and USB hubs go back to their own defaults."]));
     if (S) {
       this.simpleBox = h("div");
-      el.append(this.simpleBox, safety, details("Fine-tune each fan (draw your own fan curves)", editorGrid));
+      el.append(this.simpleBox, safety, details("Fine-tune each fan (draw your own fan curves)", editorGrid),
+        h("div.mt", advLink("Hold a fan at one speed (for testing)", "cooling", { focus: "curves", icon: "fan" })));
     } else {
       this.simpleBox = null;
       el.append(editorGrid, safety);

@@ -209,6 +209,10 @@ App.pages.dashboard = {
     const items = await refreshHealth();
     this.alerts.innerHTML = "";
     for (const n of (await App.api.startup_notes()) || []) {
+      if (n.kind === "light") {             // after-boot lighting rescan couldn't find a device: same quiet note in both views
+        this.alerts.append(banner("info", "light", n.text, h("button.btn.sm", { onclick: () => go("lighting") }, "Open Lights")));
+        continue;
+      }
       if (isSimple()) {     // tuning notices are Advanced detail; crashes are worth a plain heads-up
         if (n.kind === "bad") this.alerts.append(banner("bad", "alert", "<b>Your PC crashed or restarted by itself recently.</b> RigLab can show you why.",
           h("button.btn.sm", { onclick: () => go("crashes") }, "Find out why")));

@@ -22,7 +22,7 @@ const HOME_TOOLS = [
 // Simple view: plain names and descriptions; only pages listed in the Simple menu.
 const HOME_SIMPLE = [
   ["dashboard", "PC Health", "heart", "Your health score, a full report card, and live readings."],
-  ["explain", "My PC explained", "chip", "What's inside your PC, in plain English."],
+  ["explain", "PC Info", "chip", "What's inside your PC, in plain English."],
   ["tweaks", "Performance Tweaks", "rocket", "Make games smoother, choose which apps start with Windows, and free up space."],
   ["cooling", "Fans", "fan", "Make your PC quieter or cooler with one click."],
   ["lighting", "Lights", "light", "Pick a colour or effect for every light in your PC."],

@@ -18,17 +18,28 @@ body.clear #b{text-shadow:0 1px 2px #000,0 0 4px #000}            /* no backgrou
 #b.vert .ovs{justify-content:space-between;gap:calc(16px * var(--k,1))}
 #b.vert .ovs .k{order:-1}
 #b.hor .ovs.fps .v{font-size:1.7em}
-#b.unlocked{outline:2px dashed var(--accent);outline-offset:-2px;cursor:move}
+#b.editing{outline:2px dashed var(--accent);outline-offset:-2px;cursor:move}
+#b.idle .v{opacity:.45}
 #bar{display:flex;gap:6px;align-items:center;font:600 11px "Segoe UI",sans-serif;color:var(--accent);
-  background:color-mix(in srgb, var(--panel) 92%, transparent);padding:3px 6px;border-radius:7px}
+  background:color-mix(in srgb, var(--panel) 95%, transparent);padding:3px 6px;border-radius:7px;border:1px solid var(--accent);cursor:move}
+#bar .grip{letter-spacing:-2px;font-size:14px;line-height:1;margin-right:2px}
 #bar button{font:700 11px "Segoe UI",sans-serif;padding:3px 8px;border-radius:6px;border:1px solid var(--line-2);background:var(--panel-2);color:var(--text);cursor:pointer}
 #bar button:hover{border-color:var(--accent)}
 #dot{width:20px;height:20px;margin:3px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 2px var(--panel),0 0 8px var(--accent);cursor:pointer;display:block}
 canvas{display:block}
 /* preview mode only: a pretend game screen to drag the overlay around on */
 body.demo{height:100vh!important;background:linear-gradient(135deg,#2b4a3a,#4a3a2b 40%,#23324f)!important}
-body.demo #w{position:absolute}
-body.demo #note{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:-1;font:500 14px "Segoe UI",sans-serif;color:#fff;opacity:.7;text-align:center;line-height:1.6}
+body.demo #w{position:absolute;z-index:3}
+body.demo #note{position:fixed;left:50%;bottom:70px;transform:translateX(-50%);pointer-events:none;z-index:1;font:500 14px "Segoe UI",sans-serif;color:#fff;opacity:.75;text-align:center;line-height:1.6}
+body.demo.ct #w{pointer-events:none}                         /* click-through: the pretend game gets the click */
+body.demo #game{position:fixed;z-index:0;background:#1b2733;border:1px solid #57708a;display:flex;align-items:center;justify-content:center;
+  font:600 15px "Segoe UI",sans-serif;color:#cfe3f7;cursor:crosshair}
+body.demo #game.windowed{left:12%;top:10%;width:62%;height:62%;border-top:28px solid #2d3d4f}
+body.demo #game.borderless{inset:0;border:0;background:linear-gradient(135deg,#1d3a2a,#3a2a1d 40%,#1a2846)}
+body.demo #game.exclusive{inset:0;border:0;background:#0d0d0d}
+body.demo #modes{position:fixed;z-index:2;left:50%;bottom:16px;transform:translateX(-50%);display:flex;gap:6px;font:600 12px "Segoe UI",sans-serif}
+body.demo #modes button{padding:6px 12px;border-radius:8px;border:1px solid #556;background:#223;color:#fff;cursor:pointer}
+body.demo #modes button.on{background:#2a6;border-color:#4c8}
 </style></head>
 <body><div id="w"></div>
 <script src="js/explain_data.js"></script>
@@ -73,8 +84,8 @@ function drawGraph() {
 }
 
 function fit() {
-  const r = W.getBoundingClientRect(), key = Math.ceil(r.width) + "x" + Math.ceil(r.height);
-  if (key !== lastFit) { lastFit = key; try { api.overlay_fit(Math.ceil(r.width) + 2, Math.ceil(r.height) + 2); } catch (e) {} }
+  const r = W.getBoundingClientRect(), key = Math.ceil(r.width) + "x" + Math.ceil(r.height) + "@" + devicePixelRatio;
+  if (key !== lastFit) { lastFit = key; try { api.overlay_fit(Math.ceil(r.width), Math.ceil(r.height), devicePixelRatio); } catch (e) {} }
 }
 
 function applyLook() {
@@ -89,6 +100,7 @@ function applyLook() {
 }
 
 function render(d) {
+  if (cfg.visible === false) { W.innerHTML = ""; return; }     // hidden with the hotkey, or an exclusive-fullscreen game
   if (cfg.minimised) {
     W.innerHTML = `<span id="dot" role="button" title="RigLab overlay - click to show it again" aria-label="Show the overlay"></span>`;
     document.getElementById("dot").onclick = async () => { await api.overlay_minimise(false); tick(true); };
@@ -99,22 +111,30 @@ function render(d) {
   const noGame = d.fps && d.fps.state === "no_game";
   let html = stats.filter(s => s !== "graph").map(s => stat(s, d)).join("");
   if (stats.includes("graph")) html += `<canvas id="g" width="160" height="30" style="width:calc(160px * var(--k,1));height:calc(30px * var(--k,1))"></canvas>`;
-  const unlocked = !cfg.locked;
-  W.innerHTML = `<div id="b" class="${cfg.layout === "vertical" ? "vert" : "hor"}${unlocked ? " unlocked pywebview-drag-region" : ""}">${html}</div>` +
-    (unlocked ? `<div id="bar"><span>Drag me</span><button id="min" title="Shrink to a small dot">–</button><button id="lock" title="Lock it in place (clicks go to your game)">Lock</button></div>` : "");
-  // nothing in front is drawing frames: an FPS-only counter hides itself (no stale numbers) unless you're moving it
-  W.style.visibility = (onlyFps && noGame && !unlocked) ? "hidden" : "visible";
-  if (unlocked) {
-    for (const id of ["min", "lock"]) { const b = document.getElementById(id); b.onmousedown = e => e.stopPropagation(); b.onpointerdown = e => e.stopPropagation(); }
+  // The counter has no buttons in normal use - clicks go straight through to your game. Only while editing its
+  // position does it show an outline, a drag handle, "–" (shrink to a dot) and "Done".
+  const editing = !!cfg.editing;
+  const idle = onlyFps && noGame;          // nothing is drawing frames: show dim dashes (3.10 hid itself here)
+  W.innerHTML = (editing ? `<div id="bar" class="pywebview-drag-region" title="Drag to move"><span class="grip">⠿⠿</span><span>Drag to move</span>` +
+      `<button id="min" title="Shrink to a small dot">–</button><button id="done" title="Lock it in place">Done</button></div>` : "") +
+    `<div id="b" class="${cfg.layout === "vertical" ? "vert" : "hor"}${editing ? " editing pywebview-drag-region" : ""}${idle ? " idle" : ""}">${html}</div>`;
+  W.style.visibility = "visible";
+  document.body.classList.toggle("ct", !editing);
+  if (editing) {
+    for (const id of ["min", "done"]) { const b = document.getElementById(id); b.onmousedown = e => e.stopPropagation(); b.onpointerdown = e => e.stopPropagation(); }
     document.getElementById("min").onclick = async () => { await api.overlay_minimise(true); tick(true); };
-    document.getElementById("lock").onclick = async () => { await api.overlay_lock(true); tick(true); };
+    document.getElementById("done").onclick = async () => { await api.overlay_edit(false); tick(true); };
   }
   drawGraph();
 }
 
+let busySince = 0;
 async function tick(once) {
-  if (busy) return;
-  busy = true;
+  if (busy && Date.now() - busySince < 5000) {           // a call that never answers can't freeze the overlay for good
+    if (once !== true) setTimeout(tick, 250);            // keep the regular loop alive (a button press may be mid-update)
+    return;
+  }
+  busy = true; busySince = Date.now();
   let next = 1000;
   try {
     cfg = await api.overlay_config();
@@ -124,8 +144,10 @@ async function tick(once) {
     if ((cfg.stats || []).some(s => ["fps", "low1", "frametime", "graph"].includes(s))) next = 500;
     render(d);
     if (DEMO) placeDemo(); else fit();
-    if (!cfg.locked && !DEMO) await api.overlay_track();
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    console.error(e);
+    try { api && api.overlay_log && api.overlay_log(String(e && e.stack || e)); } catch (x) {}
+  }
   busy = false;
   if (once !== true) setTimeout(tick, next);
 }
@@ -138,7 +160,7 @@ function placeDemo() {
 function demoDrag() {
   let start = null;
   W.addEventListener("pointerdown", (e) => {
-    if (!cfg || cfg.locked || cfg.minimised || e.target.closest("#bar")) return;
+    if (!cfg || !cfg.editing || cfg.minimised || e.target.closest("button")) return;
     start = { x: e.clientX - W.offsetLeft, y: e.clientY - W.offsetTop };
     W.setPointerCapture(e.pointerId);
   });
@@ -158,8 +180,22 @@ function startDemo() {
   s.onload = () => {
     api = new DemoOverlayApi();
     document.body.classList.add("demo");
-    document.body.insertAdjacentHTML("beforeend", `<div id="note">Preview mode: this is a pretend game screen.<br>Unlock the overlay in RigLab's Settings (or press U here) to drag it.</div>`);
-    addEventListener("keydown", async (e) => { if (e.key === "u") { await api.overlay_lock(!cfg.locked); tick(true); } });
+    document.body.insertAdjacentHTML("beforeend", `<div id="game"></div><div id="note">Preview mode: a pretend game. Hold Ctrl+Alt (or use Edit position in RigLab's Settings) to move the overlay.</div>
+      <div id="modes"><button data-m="windowed">Windowed game</button><button data-m="borderless">Borderless fullscreen</button><button data-m="exclusive">Exclusive fullscreen</button></div>`);
+    const game = document.getElementById("game"); let clicks = 0;
+    game.onclick = () => { clicks++; game.dataset.clicks = clicks; game.textContent = `Game window - clicked ${clicks} time${clicks === 1 ? "" : "s"}`; };
+    const setMode = (m) => { api.setGameMode(m); game.className = m; game.textContent = m === "exclusive" ? "Exclusive fullscreen game (overlay can't draw here)" : `Game window (${m})`;
+      document.querySelectorAll("#modes button").forEach(b => b.classList.toggle("on", b.dataset.m === m)); tick(true); };
+    document.querySelectorAll("#modes button").forEach(b => b.onclick = () => setMode(b.dataset.m));
+    setMode(api.gameMode());
+    const hold = (e) => {
+      api.setHolding(e.ctrlKey && e.altKey);
+      if (e.type === "keydown" && cfg && cfg.hotkey && !["Control", "Shift", "Alt"].includes(e.key)) {
+        const combo = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.key.length === 1 ? e.key.toUpperCase() : e.key].filter(Boolean).join("+");
+        if (combo.toLowerCase() === cfg.hotkey.toLowerCase()) { api.toggleHidden(); tick(true); }
+      }
+    };
+    addEventListener("keydown", hold); addEventListener("keyup", hold); addEventListener("blur", () => api.setHolding(false));
     demoDrag();
     tick();
   };

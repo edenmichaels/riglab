@@ -545,7 +545,8 @@ details.key .key-body { display: grid; gap: 6px; padding: 8px 12px; margin-top: 
 .hdial.link { cursor: pointer; border-radius: 50%; }
 .hdial.link:hover svg, .hdial.link:focus-visible svg { transform: scale(1.03); }
 .hdial.link:focus-visible { outline: 2px solid var(--accent); outline-offset: 6px; }
-.hdial svg { width: 100%; height: 100%; transition: transform .2s; }
+.hdial svg { width: 100%; height: 100%; }
+.hdial .hd-svg { position: relative; transition: transform .2s; }
 .hdial-mid { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .hdial-num { font-size: 58px; font-weight: 750; line-height: 1; letter-spacing: -.03em; }
 .hdial-num small { font-size: 22px; margin-left: 2px; }
@@ -607,3 +608,65 @@ details.key .key-body { display: grid; gap: 6px; padding: 8px 12px; margin-top: 
 .file-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .explain-item { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 14px; align-items: start; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .explain-item:last-child { border-bottom: 0; }
+
+/* ---------------------------------------------------------------- 3.11: Undo button, advanced links, tools, speed test */
+.undo-split { display: inline-flex; }
+.undo-split .undo-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.undo-split .undo-caret { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; padding: 4px 8px; }
+.undo-split button:disabled { opacity: .45; cursor: default; }
+.undo-menu { min-width: 340px; max-width: 420px; }
+.undo-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 8px; border-radius: 8px; }
+.undo-row:hover { background: rgba(var(--accent-rgb), .08); }
+.undo-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.adv-link { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; border-radius: 12px;
+  border: 1px dashed var(--line-2); background: var(--panel); cursor: pointer; }
+.adv-link:hover, .adv-link:focus-visible { border-color: var(--accent); outline: none; }
+.adv-go { color: var(--accent); font-weight: 600; font-size: 13px; white-space: nowrap; }
+.tool-list { display: grid; gap: 4px; }
+.tool-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.tool-row:hover { background: rgba(var(--accent-rgb), .08); }
+.feature-table { width: 100%; border-collapse: collapse; }
+.feature-table th, .feature-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.feature-table th { color: var(--muted); font-size: 12px; font-weight: 600; }
+.net-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: 12px; }
+.net-tile { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); display: grid; gap: 4px; }
+.hist-mini { display: grid; grid-template-columns: 150px repeat(3, minmax(0, 1fr)) 80px; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+@media (max-width: 900px) { .hist-mini { grid-template-columns: 1fr 1fr; } }
+
+/* ---------------------------------------------------------------- health dial animation (GPU-friendly: transform/opacity only) */
+.hdial > * { position: absolute; inset: 0; }
+.hdial .hdial-mid { z-index: 2; }
+.hd-track { stroke: var(--line); }
+.hd-glow { border-radius: 50%; inset: -14px; background: radial-gradient(circle, var(--dial-c, var(--accent)) 0%, transparent 62%);
+  opacity: 0; will-change: opacity, transform; pointer-events: none; }
+.hd-scan { opacity: 0; will-change: transform; pointer-events: none; transition: opacity .3s; }
+.hd-ripple { border-radius: 50%; border: 3px solid var(--dial-c, var(--accent)); opacity: 0; pointer-events: none; will-change: transform, opacity; }
+.hd-sparks circle { transition: none; }
+.hdial.running .hd-scan { opacity: 1; animation: hd-spin 1.5s linear infinite; }
+.hdial.running .hd-track { animation: hd-shimmer 1.8s ease-in-out infinite; }
+.hdial.running .hd-glow { opacity: .14; --dial-c: var(--accent); animation: hd-breathe 2.4s ease-in-out infinite; }
+.hdial.settled-good .hd-glow { animation: hd-breathe-calm 6s ease-in-out infinite; }
+.hdial.settled-warn .hd-glow { animation: hd-breathe-warn 3.2s ease-in-out infinite; }
+.hdial.settled-bad .hd-glow { animation: hd-breathe-bad 2.2s ease-in-out infinite; }
+.hdial.is-none .hdial-num, .hdial:not(.is-none) .hdial-none { display: none; }
+.hdial.is-none .hd-sub { display: none; }
+.hd-ripple.go { animation: hd-ripple 1.1s ease-out 1; }
+.hdial.fade-in .hdial-mid, .hdial.fade-in .hd-arc { animation: hd-fade .5s ease-out 1; }
+.hdial.paused *, .hdial.paused { animation-play-state: paused !important; }
+@keyframes hd-spin { to { transform: rotate(360deg); } }
+@keyframes hd-shimmer { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .45; } }
+@keyframes hd-breathe { 0%, 100% { opacity: .08; transform: scale(.97); } 50% { opacity: .2; transform: scale(1.02); } }
+@keyframes hd-breathe-calm { 0%, 100% { opacity: .08; transform: scale(.98); } 50% { opacity: .18; transform: scale(1.01); } }
+@keyframes hd-breathe-warn { 0%, 100% { opacity: .12; transform: scale(.97); } 50% { opacity: .34; transform: scale(1.03); } }
+@keyframes hd-breathe-bad { 0%, 100% { opacity: .16; transform: scale(.96); } 50% { opacity: .46; transform: scale(1.04); } }
+@keyframes hd-ripple { 0% { opacity: .65; transform: scale(.86); } 100% { opacity: 0; transform: scale(1.28); } }
+@keyframes hd-fade { from { opacity: 0; } to { opacity: 1; } }
+/* Reduce animations (Settings) or Windows' "Animation effects" off: no moving effects, just fades */
+html.reduce-motion .hdial *, html.reduce-motion .hdial { animation: none !important; }
+html.reduce-motion .hdial.fade-in .hdial-mid, html.reduce-motion .hdial.fade-in .hd-arc { animation: hd-fade .5s ease-out 1 !important; }
+html.reduce-motion .hdial.settled-good .hd-glow, html.reduce-motion .hdial.settled-warn .hd-glow, html.reduce-motion .hdial.settled-bad .hd-glow { opacity: .14; }
+@media (prefers-reduced-motion: reduce) {
+  .hdial *, .hdial { animation: none !important; }
+  .hdial.fade-in .hdial-mid, .hdial.fade-in .hd-arc { animation: hd-fade .5s ease-out 1 !important; }
+  .hdial.settled-good .hd-glow, .hdial.settled-warn .hd-glow, .hdial.settled-bad .hd-glow { opacity: .14; }
+}

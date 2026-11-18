@@ -12,6 +12,8 @@ Settings (config "overlay"):
   snap        True = when you let go after dragging, it jumps to the nearest corner
   x, y        where it was dragged to (None = use "corner")
   hotkey      e.g. "Ctrl+Shift+O" to show/hide it, "" = none
+  move_hold   keys you hold to move it (default "Ctrl+Alt"), "" = only the Edit position switch
+  locked      (also) False while "Edit position" is on
 """
 from __future__ import annotations
 
@@ -88,6 +90,8 @@ def migrate(o: dict) -> dict:
     if o.get("corner") not in CORNERS:
         o["corner"] = "top-left"
     o["hotkey"] = o.get("hotkey") or ""
+    mh = o.get("move_hold", "Ctrl+Alt")
+    o["move_hold"] = mh if mh == "" or parse_hold(mh) else "Ctrl+Alt"
     return o
 
 
@@ -258,3 +262,76 @@ def hotkey_label(text: str) -> str:
         return ""
     return "+".join(w.upper() if len(w) <= 3 and w.lower() not in ("alt", "win") else w[:1].upper() + w[1:].lower()
                     for w in text.replace(" ", "").split("+"))
+
+
+# ------------------------------------------------------------------ 3.11: fullscreen, hold-to-move, sizing
+# SHQueryUserNotificationState results (Windows tells apps what kind of full-screen thing is running)
+QUNS_D3D_FULLSCREEN = 3        # an exclusive-fullscreen Direct3D game: nothing (not even Windows) can draw over it
+
+
+def classify_fullscreen(quns: int | None, fg_rect=None, mon_rect=None, is_shell: bool = False) -> str | None:
+    """What's in front: 'exclusive' (overlay can't show), 'borderless' (fills the screen, overlay works),
+    'windowed', or None (desktop / nothing)."""
+    if quns == QUNS_D3D_FULLSCREEN:
+        return "exclusive"
+    if not fg_rect or is_shell:
+        return None
+    if mon_rect and tuple(fg_rect) == tuple(mon_rect):
+        return "borderless"
+    return "windowed"
+
+
+def exclusive_notice(state: str | None, app: str | None, told: set) -> str | None:
+    """A plain message the first time each game is seen in exclusive fullscreen (not repeated every second)."""
+    if state != "exclusive":
+        return None
+    key = (app or "?").lower()
+    if key in told:
+        return None
+    told.add(key)
+    name = app or "This game"
+    return (f"{name} is running in exclusive fullscreen, so Windows doesn't let anything draw on top of it - including "
+            "RigLab's overlay. In the game's display settings, choose Borderless or Windowed fullscreen and the overlay will show.")
+
+
+HOLD_KEYS = {"ctrl": 0x11, "control": 0x11, "alt": 0x12, "shift": 0x10, "win": 0x5B}
+
+
+def parse_hold(text: str) -> list[int] | None:
+    """Keys you hold to move the overlay, e.g. 'Ctrl+Alt'. At least two keys, so it never triggers by accident."""
+    if not text or not isinstance(text, str):
+        return None
+    vks = []
+    for p in (x.strip().lower() for x in text.split("+")):
+        if p in HOLD_KEYS:
+            vks.append(HOLD_KEYS[p])
+        elif len(p) == 1 and p.isalnum():
+            vks.append(ord(p.upper()))
+        elif p.startswith("f") and p[1:].isdigit() and 1 <= int(p[1:]) <= 24:
+            vks.append(0x6F + int(p[1:]))
+        else:
+            return None
+    vks = list(dict.fromkeys(vks))
+    return vks if len(vks) >= 2 else None
+
+
+def edit_step(was_editing: bool, manual: bool, holding: bool) -> tuple[bool, str | None]:
+    """Edit position is on while the Settings switch is on OR the hold keys are held.
+    Returns (editing now, 'start' | 'end' | None). 'end' = lock it again and save where it was left."""
+    now = bool(manual or holding)
+    if now and not was_editing:
+        return True, "start"
+    if was_editing and not now:
+        return False, "end"
+    return now, None
+
+
+def window_size(css_w: float, css_h: float, dpr: float | None) -> tuple[int, int]:
+    """The page measures itself in CSS pixels; the window is sized in screen pixels (DPI scaling, e.g. 150%)."""
+    import math
+    k = dpr if isinstance(dpr, (int, float)) and 0.5 <= dpr <= 4 else 1.0
+    return int(math.ceil(css_w * k)) + 2, int(math.ceil(css_h * k)) + 2
+
+
+def should_be_visible(o: dict, hidden_by_key: bool, fullscreen: str | None) -> bool:
+    return bool(o.get("enabled")) and not hidden_by_key and fullscreen != "exclusive"

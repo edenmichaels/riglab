@@ -6,14 +6,15 @@
 const DemoOverlay = {
   KEY: "riglab.demo.overlay",
   def: { enabled: true, stats: ["fps"], preset: "minimal", layout: "horizontal", size: "m", opacity: 0.85, text_color: "theme", fps_color: "auto",
-    locked: true, minimised: false, snap: false, corner: "top-left", x: null, y: null, hotkey: "" },
+    locked: true, minimised: false, snap: false, corner: "top-left", x: null, y: null, hotkey: "", move_hold: "Ctrl+Alt",
+    editing: false, holding: false, hidden: false, game: "borderless" },
   load() { try { return Object.assign({}, this.def, JSON.parse(localStorage.getItem(this.KEY) || "{}")); } catch { return Object.assign({}, this.def); } },
   save(o) { try { localStorage.setItem(this.KEY, JSON.stringify(o)); } catch { /* ignore */ } return o; },
   PRESETS: { minimal: ["fps"], standard: ["fps", "cpu_temp", "gpu_temp"], full: ["fps", "low1", "frametime", "cpu_temp", "gpu_temp", "cpu_load", "gpu_load", "ram", "cpu_clock", "gpu_clock"] },
   presetOf(st) { for (const [k, v] of Object.entries(this.PRESETS)) if (JSON.stringify(v) === JSON.stringify(st)) return k; return "custom"; },
   set(values) {
     const o = this.load();
-    for (const k of ["enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color"]) if (k in values) o[k] = values[k];
+    for (const k of ["enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color", "move_hold"]) if (k in values) o[k] = values[k];
     if (this.PRESETS[values.preset]) { o.stats = this.PRESETS[values.preset].slice(); o.layout = values.preset === "full" ? "vertical" : "horizontal"; }
     if (!o.stats || !o.stats.length) o.stats = ["fps"];
     o.preset = this.presetOf(o.stats);
@@ -22,8 +23,16 @@ const DemoOverlay = {
   config() {
     const o = this.load();
     let theme = "dark"; try { theme = JSON.parse(localStorage.getItem("riglab.theme") || "{}").theme || "dark"; } catch { /* default */ }
-    return { stats: o.stats, layout: o.layout, size: o.size, opacity: o.opacity, text_color: o.text_color, fps_color: o.fps_color, locked: o.locked,
-      minimised: o.minimised, theme, edit: !o.locked, hotkey: o.hotkey };
+    const editing = !!(o.editing || (o.holding && o.move_hold));
+    return { stats: o.stats, layout: o.layout, size: o.size, opacity: o.opacity, text_color: o.text_color, fps_color: o.fps_color, locked: !editing,
+      minimised: o.minimised && !editing, theme, edit: editing, editing, hotkey: o.hotkey, move_hold: o.move_hold,
+      visible: !!o.enabled && !o.hidden && o.game !== "exclusive" };
+  },
+  status() {
+    const o = this.load(), ex = o.game === "exclusive";
+    return { enabled: !!o.enabled, visible: !!o.enabled && !o.hidden && !ex, hidden_by_key: !!o.hidden, editing: !!(o.editing || o.holding), fullscreen: o.game,
+      app: "Game.exe", hotkey_ok: true, repairs: 0, last_error: null,
+      notice: ex ? "Game.exe is running in exclusive fullscreen, so Windows doesn't let anything draw on top of it - including RigLab's overlay. In the game's display settings, choose Borderless or Windowed fullscreen and the overlay will show." : null };
   },
 };
 
@@ -37,8 +46,14 @@ class DemoOverlayApi {
     return { cpu_temp: w(62, 6, 9), gpu_temp: w(58, 7, 11), cpu_load: w(38, 12, 5), gpu_load: w(91, 6, 4), ram: w(47, 2, 30), cpu_clock: w(4950, 120, 2), gpu_clock: w(2610, 60, 3),
       fps: { state: "ok", fps, low1: fps * 0.72, frametime: 1000 / fps, app: "Game.exe" } };
   }
-  async overlay_lock(on) { const o = DemoOverlay.load(); o.locked = !!on; DemoOverlay.save(o); return { locked: o.locked }; }
-  async overlay_minimise(on) { const o = DemoOverlay.load(); o.minimised = !!on; DemoOverlay.save(o); return { minimised: o.minimised }; }
+  async overlay_lock(on) { return this.overlay_edit(!on); }
+  async overlay_edit(on) { const o = DemoOverlay.load(); o.editing = !!on; if (on) o.minimised = false; DemoOverlay.save(o); return { edit: !!on }; }
+  async overlay_minimise(on) { const o = DemoOverlay.load(); o.minimised = !!on; if (on) o.editing = false; DemoOverlay.save(o); return { minimised: o.minimised }; }
+  async overlay_log(m) { console.warn("overlay:", m); return true; }
+  setGameMode(m) { const o = DemoOverlay.load(); o.game = m; DemoOverlay.save(o); }
+  gameMode() { return DemoOverlay.load().game || "borderless"; }
+  setHolding(on) { const o = DemoOverlay.load(); if (!!o.holding === !!on) return; o.holding = !!on; if (on) o.minimised = false; DemoOverlay.save(o); }
+  toggleHidden() { const o = DemoOverlay.load(); o.hidden = !o.hidden; DemoOverlay.save(o); }
   async overlay_fit() { return true; }
   async overlay_track() { return { state: null }; }
   /* same rules as core/overlay.py: keep inside the screen; snap to the nearest corner if snapping is on */
@@ -147,7 +162,7 @@ class DemoApi {
     return v.toFixed(1) + " " + d.unit;
   }
   // ------------------------------------------------------------ api
-  async info() { const ui = this.uiCfg ||= this._uiLoad(); return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.10.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
+  async info() { const ui = this.uiCfg ||= this._uiLoad(); return { ui, view: ui.view || "simple", lights: window.EXPLAIN_DATA ? window.EXPLAIN_DATA.lights : {}, version: "3.11.0", admin: true, platform: "win32", demo: true, status: this.status() }; }
   status() { return { "LibreHardwareMonitor": "active", "liquidctl (fan hubs / AIOs)": "active", "NVIDIA NVML": "active", psutil: "active" }; }
   async snapshot() {
     this.sample(0);
@@ -357,13 +372,23 @@ class DemoApi {
   }
   async gpu_runs() { return this.gtRuns ||= []; }
   async gpu_run_edit(id, label, score, del) { const r = this.gtRuns || []; const x = r.find(q => q.id === id); if (x && del) r.splice(r.indexOf(x), 1); else if (x && score) x.stats.score = +score; return r; }
-  async ui_set(v) { Object.assign(this.uiCfg ||= this._uiLoad(), v); try { localStorage.setItem("riglab.demo.ui", JSON.stringify(this.uiCfg)); } catch { /* ignore */ } return this.uiCfg; }
+  async ui_set(v) {
+    const ui = (this.uiCfg ||= this._uiLoad()), names = { theme: "theme", accent: "highlight colour", text_scale: "text size", reduce_motion: "animations" };
+    const changed = Object.keys(v).filter(k => k in names && ui[k] !== v[k]);
+    if (changed.length && !v._undo) this._log("appearance", "Look changed: " + changed.map(k => names[k]).join(", "),
+      Object.fromEntries(changed.map(k => [k, ui[k] ?? null])), Object.fromEntries(changed.map(k => [k, v[k]])), true, "you", "Low", "appearance");
+    Object.assign(ui, v); try { localStorage.setItem("riglab.demo.ui", JSON.stringify(this.uiCfg)); } catch { /* ignore */ } return this.uiCfg; }
   _uiLoad() { try { return JSON.parse(localStorage.getItem("riglab.demo.ui") || "{}"); } catch { return {}; } }
   async light_reset() { return true; }
   async light_connect() { this.lightPaused = false; this.lightT = Date.now(); return true; }
   async light_pause(on) { this.lightPaused = on; return on; }
   async light_pick_exe() { return this.light_state(); }
-  async light_set(s) { Object.assign(this.lightState, s); return true; }
+  async light_set(s) {
+    const before = Object.assign({}, this.lightState);
+    Object.assign(this.lightState, s);
+    if (JSON.stringify(before) !== JSON.stringify(this.lightState)) this._log("lighting", "Lights: " + (this.lightState.effect || "changed"), { state: before }, { state: Object.assign({}, this.lightState) }, true, "you", "Low", "lighting");
+    return true;
+  }
   async light_device(k, s) { Object.assign(this.L.set[k], s); return this.light_state(); }
   async light_zone(k, z, size, per, empty) { this.L.zones[k + "|" + z] = { size, per: per || 0, empty: !!empty }; return this.light_state(); }
   async light_test() { return true; }
@@ -438,9 +463,13 @@ class DemoApi {
   async startup_set(i, on) { const n = ["Discord", "Steam", "OpenRGB", "EpicGamesLauncher"][i] || "App"; this._log("startup", `${n}: ${on ? "opens" : "no longer opens"} when Windows starts`, { name: n, on: !on }, { name: n, on }); return "ok"; }
   async junk(clean) { await new Promise(r => setTimeout(r, 600)); if (clean) this._log("junk", "Freed 2.1 GB of temporary files", null, null, false); return { bytes: 2.3e9, files: 4821 }; }
   async fans_preset(name) { for (const d of this.defs.filter(x => x.ctrl)) this._log("fan_curve", `${d.name}: ${name} fan setting`, { cid: d.id, curve: this.curves[d.id] || null }, { cid: d.id }); this.fanOn = true; return { ok: true, msg: `All fans set to ${name}`, count: 3 }; }
-  _log(kind, title, before = null, after = null, undo = true, source = "you", risk = "Low") {
+  _log(kind, title, before = null, after = null, undo = true, source = "you", risk = "Low", merge = null) {
     const c = (this.changes ||= []);
-    const e = { id: c.length + 1, time: Date.now() / 1000, kind, title, before, after, risk, source, can_undo: undo && source !== "undo", undone_by: null, ok: true, detail: "" };
+    const last = c[c.length - 1];
+    if (merge && last && last.merge === merge && last.can_undo && !last.undone_by && Date.now() / 1000 - last.time < 90) {
+      Object.assign(last, { title, after, time: Date.now() / 1000 }); return last;
+    }
+    const e = { id: c.length + 1, time: Date.now() / 1000, kind, title, before, after, risk, source, can_undo: undo && source !== "undo", undone_by: null, ok: true, detail: "", merge };
     c.push(e); return e;
   }
   // ---------------------------------------------------------------- PC health dial (preview)
@@ -563,6 +592,37 @@ class DemoApi {
     this._log("preset", `Applied the ${p.name} preset`, before, { preset: id }, true, "you", p.risk).detail = p.changes.map(x => x.text).join(" ");
     return { ok: true, changed: p.changes.length, msg: `${p.name} preset applied. You can undo it in Change history.` };
   }
+  // ---------------------------------------------------------------- internet speed test (preview): set App.api.demoNetOffline = true to see offline
+  async netspeed_start() {
+    this.net = { t0: Date.now(), cancelled: false, offline: !!this.demoNetOffline };
+    return this.netspeed_status();
+  }
+  async netspeed_status() {
+    const n = this.net;
+    if (!n) return { running: false, result: null };
+    const steps = [["Checking your connection", 0.8], ["Finding the nearest test server", 0.6], ["Measuring ping, jitter and packet loss", 1.6], ["Testing download speed", 2.2], ["Testing upload speed", 2]];
+    const el = (Date.now() - n.t0) / 1000, tot = steps.reduce((a, s) => a + s[1], 0);
+    let acc = 0, i = 0; for (; i < steps.length && el >= acc + steps[i][1]; i++) acc += steps[i][1];
+    const done = n.cancelled || i >= steps.length || (n.offline && i >= 1);
+    const partial = {};
+    if (!n.offline) { if (i > 2) Object.assign(partial, { ping: 14, jitter: 2.3, loss: 0 }); if (i > 3) partial.download = 286.4; if (i > 4) partial.upload = 41.2; }
+    if (!done) return { running: true, step: steps[i][0], index: i + 1, count: steps.length, progress: Math.min(.99, el / tot), eta_text: "less than a minute left", partial };
+    if (n.cancelled) return { running: false, cancelled: true, result: null };
+    if (!n.result) {
+      n.result = n.offline ? { time: Date.now() / 1000, offline: true, summary: { state: "bad", say: "No internet connection. Connect to the internet and try again." } }
+        : { time: Date.now() / 1000, offline: false, download: 286.4, upload: 41.2, ping: 14, jitter: 2.3, loss: 0, server: "Cloudflare BNE (Brisbane, AU)", isp: "Example Broadband",
+          ip: "203.0.113.42", data_mb: 214.6, conn: { type: "Wi-Fi", adapter: "Intel Wi-Fi 6E AX210", link: "1.2 Gbps", signal: 82, band: "5 GHz", radio: "802.11ax", signal_words: "excellent" },
+          summary: { state: "good", say: "Fast enough for 4K streaming and online gaming." } };
+      if (!n.offline) (this.netHist ||= this._netSeed()).unshift(n.result);
+    }
+    return { running: false, result: n.result, partial };
+  }
+  async netspeed_cancel() { if (this.net) this.net.cancelled = true; return true; }
+  _netSeed() { const d = 86400, t = Date.now() / 1000; return [[-2, 271, 39, 16], [-6, 248, 40, 15], [-13, 95, 38, 22]].map(([x, dn, up, p]) => ({ time: t + x * d, download: dn, upload: up, ping: p, jitter: 3, loss: 0, conn: { type: "Wi-Fi" } })); }
+  async netspeed_history() { return { items: (this.netHist ||= this._netSeed()), note: "A test uses some internet data: up to about 300 MB on a fast connection, much less on a slow one." }; }
+  async autostart_state() { return { on: this.autostart !== false, task: this.autostart !== false }; }
+  async autostart_set(on) { this._log("autostart", "RigLab starts with Windows: " + (on ? "on" : "off"), { on: this.autostart !== false }, { on }); this.autostart = on; return { ok: true, msg: on ? "RigLab will start when you sign in to Windows." : "RigLab won't start with Windows." }; }
+
   // ---------------------------------------------------------------- extras (preview)
   async explain_pc() {
     await new Promise(r => setTimeout(r, 500));
@@ -607,19 +667,37 @@ class DemoApi {
     }
     return this.changes.slice().reverse().map(e => ({ ...e, undoable: e.can_undo && !e.undone_by }));
   }
+  async changes_summary() {
+    await this.changes_list();
+    const c = this.changes || [];
+    const ok = (e) => e.can_undo && !e.undone_by;
+    const last = [...c].reverse().find(ok) || null;
+    const slim = (e) => ({ id: e.id, time: e.time, kind: e.kind, title: e.title, risk: e.risk, source: e.source, undoable: ok(e), undone_by: e.undone_by, ok: e.ok });
+    return { last: last && slim(last), recent: [...c].reverse().slice(0, 8).map(slim), count: c.filter(ok).length };
+  }
   async change_undo(id) {
     const e = (this.changes || []).find(x => x.id === +id);
     if (!e || !e.can_undo || e.undone_by) return { ok: false, msg: "This change can't be undone (or was already undone)" };
     if (e.kind === "preset") this.pcur = JSON.parse(JSON.stringify(e.before));
+    if (e.kind === "appearance") { Object.assign(this.uiCfg ||= this._uiLoad(), e.before); try { localStorage.setItem("riglab.demo.ui", JSON.stringify(this.uiCfg)); } catch { /* ignore */ } }
+    if (e.kind === "lighting") Object.assign(this.lightState, e.before.state);
+    if (e.kind === "autostart") this.autostart = e.before.on;
+    if (e.kind === "overlay") DemoOverlay.save(Object.assign(DemoOverlay.load(), e.before));
     const n = this._log(e.kind, "Undid: " + e.title, e.after, e.before, false, "undo", e.risk); e.undone_by = n.id;
     return { ok: true, msg: "Put back the way it was" };
   }
   async settings() { this.cfg.overlay = DemoOverlay.load(); return this.cfg; }
   async overlay_config() { return DemoOverlay.config(); }
-  async overlay_set(v) { return { overlay: DemoOverlay.set(v || {}), hotkey_ok: true }; }
-  async overlay_lock(on) { const o = DemoOverlay.load(); o.locked = !!on; if (!on) o.enabled = true; DemoOverlay.save(o); return { locked: o.locked, x: o.x, y: o.y }; }
-  async overlay_edit(on) { const r = await this.overlay_lock(!on); return { edit: !r.locked, x: r.x, y: r.y }; }
-  async overlay_minimise(on) { const o = DemoOverlay.load(); o.minimised = !!on; DemoOverlay.save(o); return { minimised: o.minimised }; }
+  async overlay_set(v) {
+    const before = DemoOverlay.load(), o = DemoOverlay.set(v || {});
+    if (!v._undo && ["stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "move_hold", "enabled", "fps_color"].some(k => JSON.stringify(before[k]) !== JSON.stringify(o[k])))
+      this._log("overlay", "Overlay settings changed", before, o, true, "you", "Low", "overlay");
+    return { overlay: o, hotkey_ok: true };
+  }
+  async overlay_edit(on) { const o = DemoOverlay.load(); o.editing = !!on; if (on) { o.enabled = true; o.minimised = false; } DemoOverlay.save(o); return { edit: !!on, x: o.x, y: o.y }; }
+  async overlay_lock(on) { const r = await this.overlay_edit(!on); return { locked: !r.edit, x: r.x, y: r.y }; }
+  async overlay_status() { return DemoOverlay.status(); }
+  async overlay_minimise(on) { const o = DemoOverlay.load(); o.minimised = !!on; if (on) o.editing = false; DemoOverlay.save(o); return { minimised: o.minimised }; }
   async overlay_corner(c) { const o = DemoOverlay.load(); o.corner = c; o.x = o.y = null; DemoOverlay.save(o); return true; }
   async overlay_fit() { return true; }
   async save_settings(c) { this.cfg = c; return true; }

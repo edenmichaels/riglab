@@ -69,6 +69,9 @@ const ICON_PATHS = {
   trash: "M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6",
   rocket: "M5 15c-1.5 1.3-2 5-2 5s3.7-.5 5-2M12 15l-3-3M9 12c1-5 5-9 11-9 0 6-4 10-9 11M15 9h.01",
   undo: "M3 7v6h6M3 13a9 9 0 1 0 3-7.7L3 8",
+  grid: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
+  palette: "M12 3a9 9 0 1 0 0 18c1.1 0 1.6-.8 1.6-1.6 0-.9-.6-1.3-.6-2.1 0-.9.7-1.6 1.6-1.6H17a4 4 0 0 0 4-4C21 6.6 17 3 12 3zM7.5 12a1.2 1.2 0 1 0 0-.01M10 7.5a1.2 1.2 0 1 0 0-.01M14.5 7.5a1.2 1.2 0 1 0 0-.01",
+  speed: "M12 14l4-6M3.5 17a9 9 0 1 1 17 0",
   bench: "M4 20V10M10 20V4M16 20v-7M22 20H2",
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   link: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7",
@@ -109,6 +112,7 @@ function toast(msg, bad = false) {
   const t = h("div.toast" + (bad ? ".bad" : ""), msg);
   box.append(t);
   setTimeout(() => t.remove(), 4500);
+  if (typeof UndoBtn !== "undefined") setTimeout(() => UndoBtn.refresh(), 150);     // something probably changed
 }
 
 // ------------------------------------------------------------------ canvas helpers

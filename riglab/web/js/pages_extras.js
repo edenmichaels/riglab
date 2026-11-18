@@ -1,11 +1,11 @@
-/* My PC explained, and Free up space (storage clean-up). */
+/* PC Info, and Free up space (storage clean-up). */
 "use strict";
 
-// =================================================================== My PC explained
+// =================================================================== PC Info
 App.pages.explain = {
   async render(el) {
     this.el = el;
-    el.append(plainHead("My PC explained", "What's inside your PC, what each part does, and what it's good for.",
+    el.append(plainHead("PC Info", "What's inside your PC, what each part does, and what it's good for.",
       "PC summary", "A plain-English summary of the hardware inventory. Full specs are on the Hardware page."),
       h("div", { style: { margin: "-8px 0 12px" } }, colourKey({ grey: false, label: "What do the coloured dots mean?" })));
     const box = h("div.card", h("div.empty", h("div.spinner"), h("div.mt", "Reading your hardware… (a few seconds)")));
@@ -110,5 +110,66 @@ App.pages.storage = {
       this.drawBig(b);
       if (b.running) this.pollBig();
     }, 1000);
+  },
+};
+
+// =================================================================== More tools (Simple) / All tools (Advanced)
+const FEATURE_ICONS = { sensors: "pulse", hardware: "chip", stress: "flame", overclock: "bolt", gputune: "gpu", risky_tweaks: "sliders",
+  gpu_power: "gpu", fan_manual: "fan", setup: "heart", netspeed: "net", storage: "trash", themes: "palette", overlay: "overlay" };
+App.pages.tools = {
+  render(el) {
+    const S = isSimple(), F = window.FEATURES || [];
+    const label = (page) => { const n = NAV.find(x => x[0] === page && (S ? x[3] : x[1])); return n ? (S ? n[3] : n[1]) : page; };
+    const goF = (f) => { const t = S ? f.simple : f.advanced; if (t.tab && App.pages[t.page]) App.pages[t.page].tab = t.tab; go(t.page, t.focus ? { focus: t.focus } : {}); };
+    el.append(plainHead("More tools", "Everything RigLab can do. Some tools are only shown in Advanced view - their card switches view and takes you straight there.",
+      "All tools", "Every feature and where it lives in Simple and Advanced view. Nothing exists in only one view."));
+    if (S) {
+      el.append(h("div.card", cardHead("Advanced features", "sliders"), h("div.sub", "These are hidden in Simple view because they're technical or riskier. They're still here when you want them."),
+        h("div.stack", { style: { gap: "8px" } }, F.filter(f => f.simple.link).map(f => advLink(f.name, f.advanced.page, { focus: f.advanced.focus, tab: f.advanced.tab, icon: FEATURE_ICONS[f.id] })))),
+        h("div.card.mt", cardHead("In Simple view", "home"), h("div.tool-list", F.filter(f => !f.simple.link && f.id !== "tools").map(f =>
+          h("button.tool-row", { onclick: () => goF(f) }, h("span", f.name), h("span.small.muted", label(f.simple.page) + " →"))))));
+      return;
+    }
+    el.append(h("div.card", h("table.feature-table", h("thead", h("tr", h("th", "Feature"), h("th", "Simple view"), h("th", "Advanced view"))),
+      h("tbody", F.map(f => h("tr",
+        h("td", h("a", { href: "#", onclick: (e) => { e.preventDefault(); goF(f); } }, f.name)),
+        h("td", f.simple.link ? h("span.small", "Card in More tools → opens Advanced") : label(f.simple.page) + (f.simple.focus ? " (section)" : "")),
+        h("td", label(f.advanced.page) + (f.advanced.tab ? " → GPU tab" : "") + (f.advanced.focus ? " (section)" : ""))))))));
+  },
+};
+
+// =================================================================== Themes
+App.pages.themes = {
+  render(el) {
+    el.append(plainHead("Themes", "Pick how RigLab looks. Changes apply straight away and are saved. Green, yellow and red stay easy to read in every theme.",
+      "Themes", "Colour palettes and highlight colour. Applies instantly (ui.theme / ui.accent). Licences are in Settings → About."));
+    const box = h("div");
+    const ui = () => (App.info.ui ||= {});
+    const draw = () => {
+      const cur = Theme.cur;
+      box.replaceChildren(
+        h("div.card", cardHead("Theme", "palette"),
+          h("div.theme-grid", THEMES.map(([id, name]) => {
+            const pvTheme = id === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : id;
+            return h("button.theme-card" + (cur.theme === id ? ".on" : ""), { "aria-pressed": cur.theme === id, title: name, "data-theme-id": id,
+              onclick: () => { ui().theme = id; ui().accent = "theme"; Theme.set({ theme: id, accent: "theme" }); } },
+              h("div.theme-pv", { "data-theme": pvTheme }, h("div.side"), h("div.main", h("div.ln"), h("div.ln.m"),
+                h("div.dots", h("i", { style: { background: "var(--good)" } }), h("i", { style: { background: "var(--warn)" } }), h("i", { style: { background: "var(--bad)" } }),
+                  h("i", { style: { background: "var(--accent)", marginLeft: "auto" } })))),
+              h("div.theme-name", { "data-theme": pvTheme }, name, cur.theme === id ? " ✓" : ""));
+          }))),
+        h("div.card.mt", cardHead("Highlight colour", "sliders"), h("div.sub", "The colour for buttons, links and selected items. 'Theme's own' uses the theme's colour."),
+          h("div.row.wrap", { style: { gap: "12px" } }, Object.entries(THEME_ACCENTS).map(([k, l]) => {
+            const pal = { theme: ["var(--accent)", "var(--accent-2)"], cyan: ["#36d6ff", "#8f6bff"], violet: ["#a37bff", "#ff5fb8"], emerald: ["#2fe0a0", "#2fb5ff"], amber: ["#ffb636", "#ff6b3d"], crimson: ["#ff4d6d", "#ff9a3d"], ocean: ["#4d8dff", "#36d6ff"], mono: ["#c7cedb", "#7d8799"] }[k];
+            const on = (cur.accent || "theme") === k;
+            return h("div", { style: { textAlign: "center" } }, h("div.theme-swatch" + (on ? ".on" : ""), { role: "button", tabIndex: 0, title: l, "aria-label": l + " highlight colour", "aria-pressed": on,
+              style: { background: k === "theme" ? `linear-gradient(135deg, ${pal[0]} 50%, ${pal[1]} 50%)` : `linear-gradient(135deg, ${pal[0]}, ${pal[1]})` },
+              onclick: () => { ui().accent = k; Theme.set({ accent: k }); } }), h("div.small.muted", { style: { marginTop: "4px" } }, k === "theme" ? "Theme's own" : l));
+          }))),
+        h("div.card.mt", cardHead("How the status colours look in this theme", "info"), colourKey({ risk: true, label: "Show the colour and risk key" }),
+          h("div.small.muted", { style: { marginTop: "8px" } }, "Theme palettes are used under the MIT licence. Credits are in Settings → About.")));
+    };
+    draw();
+    el.append(box);
   },
 };

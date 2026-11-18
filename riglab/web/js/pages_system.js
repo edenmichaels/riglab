@@ -27,25 +27,22 @@ App.pages.tweaks = {
   async redraw() { this.draw(await App.api.tweaks_state()); },
   draw(st) {
     const S = isSimple(), parts = [];
-    if (!st.admin) parts.push(banner("bad", "alert", S ? "Some of these need RigLab to have full permission (administrator)." : "Some tweaks need RigLab running as administrator.",
-      h("button.btn.sm", { onclick: () => App.api.fix("restart_admin") }, S ? "Give RigLab permission" : "Restart as admin")));
 
-    parts.push(h("div.card.glow", cardHead(S ? "One click for gamers" : "Recommended for gaming", "rocket"),
-      h("div.sub", "Switches on Game Mode and switches off background game recording. Only changes what isn't set already."),
-      actionBtn("tweaks.recommended", async () => { const r = await App.api.tweaks_recommended(); toast(r.msg, !r.ok); this.redraw(); }, { cls: "primary", icon: "rocket" })));
 
     const plainPlan = (p) => PLAN_PLAIN[p.name.toLowerCase()] || [p.name, ""];
     const plans = h("div.plans", st.plans.map(p => h("div.plan" + (p.active ? ".on" : ""), { role: "button", tabIndex: 0,
       onclick: async () => { if (p.active) return; const ok = await guarded("power.plan", () => App.api.set_power_plan(p.guid)); if (ok != null) { toast(S ? "Now using: " + plainPlan(p)[0] : "Power plan: " + p.name); this.redraw(); } } },
       h("div.n", S ? plainPlan(p)[0] : p.name), h("div.small.muted", p.active ? (S ? "In use now" : "Active") : (S ? plainPlan(p)[1] || "Click to use" : "Click to use")))));
-    parts.push(h("div.card.mt", cardHead(S ? "How hard should my PC work?" : "Power plan", "bolt", infoBtn("power.plan"),
+    parts.push(h("div.card", { "data-anchor": "power" }, cardHead(S ? "How hard should my PC work?" : "Power plan", "bolt", infoBtn("power.plan"),
       actionBtn("power.ultimate", async () => { await App.api.add_ultimate(); this.redraw(); }, { cls: "sm", label: S ? "+ Maximum speed" : "+ Ultimate Performance" })),
       h("div.sub", S ? "Pick one. You can change it back any time." : "High performance / Ultimate keep clocks up for lower latency but use more power. Balanced is fine for most modern CPUs."),
       st.plans.length ? plans : h("div.muted.small", "Windows only.")));
+    if (!st.admin) parts.push(h("div.mt", banner("bad", "alert", S ? "Some of these need RigLab to have full permission (administrator)." : "Some tweaks need RigLab running as administrator.",
+      h("button.btn.sm", { onclick: () => App.api.fix("restart_admin") }, S ? "Give RigLab permission" : "Restart as admin"))));
 
     const cats = {};
     for (const t of st.tweaks) (cats[t.cat] ||= []).push(t);
-    const tcard = h("div.card.mt", cardHead(S ? "Windows settings" : "Windows & gaming", "sliders"));
+    const tcard = h("div.card.mt", { "data-anchor": "windows" }, cardHead(S ? "Windows settings" : "Windows & gaming", "sliders"));
     let shownCount = 0;
     for (const [cat, list] of Object.entries(cats)) {
       const rows = list.map(t => {
@@ -59,12 +56,14 @@ App.pages.tweaks = {
       shownCount += rows.length;
       tcard.append(h("div.nav-label", { style: { padding: "10px 0 0" } }, S ? ({ Gaming: "Games", Input: "Mouse", Visual: "Looks", Network: "Internet" }[cat] || cat) : cat), ...rows);
     }
-    if (S && st.tweaks.length > shownCount) tcard.append(h("div.small.muted", { style: { paddingTop: "10px" } }, "More settings are in Advanced view. Use the Simple / Advanced switch at the top of the window."));
     parts.push(tcard);
+    if (S) parts.push(h("div.mt.stack", { style: { gap: "8px" } },
+      st.tweaks.length > shownCount ? advLink("More Windows settings (GPU scheduling, network throttling)", "tweaks", { focus: "windows", desc: "Medium-risk settings that need a restart." }) : null,
+      advLink("Graphics card power limit", "tweaks", { focus: "gpu", icon: "gpu", desc: "Make the graphics card cooler and quieter by limiting its power." })));
 
     if (!S) {
       const g = st.gpu;
-      const gcard = h("div.card.mt", cardHead("Graphics card power limit", "gpu", infoBtn("gpu.power_limit")));
+      const gcard = h("div.card.mt", { "data-anchor": "gpu" }, cardHead("Graphics card power limit", "gpu", infoBtn("gpu.power_limit")));
       if (g && !g.error) {
         let w = Math.round(g.cur);
         gcard.append(h("div.sub", `${g.name} · allowed ${Math.round(g.min)}–${Math.round(g.max)} W. Lower = cooler & quieter for a small FPS loss. Resets on reboot.`),
@@ -184,8 +183,25 @@ const OV_PRESETS = [["minimal", "Minimal", "FPS only"], ["standard", "Standard",
 
 /* Overlay settings. Every change applies straight away (no Save needed) and is saved. */
 function overlayCard(initial) {
-  let ov = Object.assign({}, initial);
-  const box = h("div.card#overlay-settings");
+  let ov = Object.assign({}, initial), editing = false;
+  const box = h("div.card#overlay-settings", { "data-anchor": "overlay" });
+  const statusLine = h("div");
+  /* What's going on, in plain words - including why it can't show (exclusive fullscreen) or why it's hidden. */
+  const status = async () => {
+    if (!box.isConnected && status.ran) return;
+    status.ran = true;
+    let st;
+    try { st = await App.api.overlay_status(); } catch { st = null; }
+    if (!st) return;
+    if (st.editing !== editing) { editing = st.editing; draw(); }
+    const msgs = [];
+    if (st.notice && st.fullscreen === "exclusive") msgs.push(banner("bad", "alert", "<b>The overlay can't show over this game.</b> " + st.notice));
+    else if (st.hidden_by_key) msgs.push(banner("info", "info", `The overlay is hidden with your show/hide key${ov.hotkey ? ` (${ov.hotkey})` : ""}. Press it again to show it.`));
+    if (st.hotkey_ok === false) msgs.push(banner("bad", "alert", "Another app is already using your show/hide key. Pick a different one below."));
+    if (st.last_error && !App.demo) msgs.push(h("div.small.muted", "Last overlay problem (sent to RigLab's log): " + st.last_error));
+    statusLine.replaceChildren(...msgs);
+    setTimeout(status, 2000);
+  };
   const set = async (values) => {
     try { const r = await App.api.overlay_set(values); ov = r.overlay; if (values.hotkey !== undefined && !r.hotkey_ok) toast("That key combination is already used by another app. Try a different one.", true); }
     catch (e) { toast("Couldn't change the overlay: " + e, true); }
@@ -217,6 +233,9 @@ function overlayCard(initial) {
         switchEl(ov.fps_color !== "plain", (v) => set({ fps_color: v ? "auto" : "plain" }))),
       h("div.opt", h("div", h("div.t", "Snap to the nearest corner"), h("div.d", "When you let go after dragging, it jumps neatly into the closest corner.")),
         switchEl(!!ov.snap, (v) => set({ snap: v }))),
+      h("div.opt", h("div", h("div.t", "Hold to move"), h("div.d", "Hold these keys and drag the overlay. Let go to lock it again.")),
+        h("select", { "aria-label": "Keys to hold to move the overlay", onchange: (e) => set({ move_hold: e.target.value }) },
+          [["Ctrl+Alt", "Ctrl + Alt"], ["Ctrl+Shift", "Ctrl + Shift"], ["Alt+Shift", "Alt + Shift"], ["", "Off (use Edit position)"]].map(([v, l]) => h("option", { value: v, selected: (ov.move_hold ?? "Ctrl+Alt") === v }, l)))),
       h("div.opt", h("div", h("div.t", "Show / hide key"), h("div.d", ov.hotkey ? `Press ${ov.hotkey} in any game to hide or show the overlay. Backspace clears it.` : "Optional. Pick a key combination to hide or show the overlay in any game.")),
         h("div.row", { style: { gap: "6px" } }, hk, ov.hotkey ? h("button.btn.sm", { onclick: () => set({ hotkey: "" }) }, "Clear") : null)),
       h("div.opt", h("div.t", "Move to a corner now"),
@@ -225,14 +244,18 @@ function overlayCard(initial) {
     ];
     box.replaceChildren(cardHead("In-game overlay", "overlay"),
       h("div.sub", "A small box on top of your games that shows FPS and other readings. It works in borderless and windowed games (not exclusive fullscreen)."),
+      statusLine,
       h("div.opt", h("div.t", "Show overlay"), switchEl(!!ov.enabled, (v) => set({ enabled: v }))),
       h("div.small.muted", { style: { margin: "8px 0 6px" } }, "Preset"),
       h("div.row.wrap", { style: { gap: "8px" } }, OV_PRESETS.map(([k, l, d]) => h("button.btn.sm" + (ov.preset === k ? ".primary" : ""), { "aria-pressed": ov.preset === k, title: d, onclick: () => set({ preset: k }) }, l, h("span.small", { style: { opacity: .75, marginLeft: "6px" } }, d))),
         ov.preset === "custom" ? h("span.pill", "Your own mix") : null),
       h("div.opt", h("div.t", "Size"), seg([["s", "Small"], ["m", "Medium"], ["l", "Large"], ["xl", "Extra large"]], ov.size, (v) => set({ size: v }))),
       h("div", { style: { padding: "6px 0" } }, sliderRow("Background", 0, 100, Math.round((ov.opacity ?? 0.85) * 100), 5, "%", debounce((v) => set({ opacity: v / 100 }), 250))),
-      h("div.opt", h("div", h("div.t", "Lock in place"), h("div.d", ov.locked !== false ? "Locked: clicks go straight through to your game." : "Unlocked: drag the overlay anywhere. Its – button shrinks it to a dot.")),
-        switchEl(ov.locked !== false, async (v) => { await App.api.overlay_lock(v); ov.locked = v; if (!v) ov.enabled = true; toast(v ? "Overlay locked" : "Overlay unlocked - drag it where you want it"); draw(); })),
+      h("div.opt", h("div", h("div.t", "Position"), h("div.d", editing
+          ? "Editing: drag the overlay by its handle, then press Done (on the overlay or here)."
+          : `Clicks always go straight through to your game.${ov.move_hold ? ` To move it, hold ${ov.move_hold} and drag it, or press Edit position.` : " Press Edit position to move it."}`)),
+        h("button.btn.sm" + (editing ? ".primary" : ""), { onclick: async () => { const r = await App.api.overlay_edit(!editing); editing = r.edit; ov.enabled = true; draw(); } },
+          icon(editing ? "check" : "move"), editing ? "Done" : "Edit position")),
       h("div.opt", h("div", h("div.t", "Shrink to a dot"), h("div.d", "Hides the readings and leaves a small dot. Click the dot to bring them back.")),
         switchEl(!!ov.minimised, async (v) => { await App.api.overlay_minimise(v); ov.minimised = v; draw(); })),
       S ? details("More overlay options (what to show, layout, colours, hotkey)", ...more) : h("div", ...more),
@@ -240,41 +263,28 @@ function overlayCard(initial) {
       App.demo ? h("div.small.muted.mt", "Preview mode: ", h("a", { href: "overlay.html", target: "_blank" }, "open the overlay preview"), " to see and drag it.") : null);
   };
   draw();
+  status();
   return box;
 }
 
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
-function appearanceCard(c) {
-  const ui = c.ui || (c.ui = { theme: "dark", accent: "cyan", start_page: "home" });
-  const box = h("div.card#appearance");
+/* Display: text size, start page and animations. (Themes and colours have their own Themes page.) */
+function displayCard(c) {
+  const ui = c.ui || (c.ui = {});
+  const box = h("div.card#display");
   const draw = () => {
     const cur = Theme.cur;
-    box.replaceChildren(cardHead("Themes", "sliders"),
-      h("div.sub", "Pick a look. It changes straight away and is saved. Green, yellow and red stay easy to read in every theme."),
-      h("div.theme-grid", THEMES.map(([id, name]) => {
-        const pvTheme = id === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : id;
-        return h("button.theme-card" + (cur.theme === id ? ".on" : ""), { "aria-pressed": cur.theme === id, title: name,
-          onclick: () => { ui.theme = id; ui.accent = "theme"; Theme.set({ theme: id, accent: "theme" }); draw(); } },
-          h("div.theme-pv", { "data-theme": pvTheme }, h("div.side"), h("div.main", h("div.ln"), h("div.ln.m"),
-            h("div.dots", h("i", { style: { background: "var(--good)" } }), h("i", { style: { background: "var(--warn)" } }), h("i", { style: { background: "var(--bad)" } }),
-              h("i", { style: { background: "var(--accent)", marginLeft: "auto" } })))),
-          h("div.theme-name", { "data-theme": pvTheme }, name, cur.theme === id ? " ✓" : ""));
-      })),
-      h("div.small.muted", { style: { margin: "16px 0 8px" } }, "Highlight colour"),
-      h("div.row.wrap", { style: { gap: "12px" } }, Object.entries(THEME_ACCENTS).map(([k, l]) => {
-        const pal = { theme: ["var(--accent)", "var(--accent-2)"], cyan: ["#36d6ff", "#8f6bff"], violet: ["#a37bff", "#ff5fb8"], emerald: ["#2fe0a0", "#2fb5ff"], amber: ["#ffb636", "#ff6b3d"], crimson: ["#ff4d6d", "#ff9a3d"], ocean: ["#4d8dff", "#36d6ff"], mono: ["#c7cedb", "#7d8799"] }[k];
-        const on = (cur.accent || "theme") === k;
-        return h("div", { style: { textAlign: "center" } }, h("div.theme-swatch" + (on ? ".on" : ""), { role: "button", tabIndex: 0, title: l, "aria-label": l + " highlight colour", "aria-pressed": on,
-          style: { background: k === "theme" ? `linear-gradient(135deg, ${pal[0]} 50%, ${pal[1]} 50%)` : `linear-gradient(135deg, ${pal[0]}, ${pal[1]})` },
-          onclick: () => { ui.accent = k; Theme.set({ accent: k }); draw(); } }), h("div.small.muted", { style: { marginTop: "4px" } }, k === "theme" ? "Theme's own" : l));
-      })),
-      h("div.opt", { style: { marginTop: "14px" } }, h("div", h("div.t", "Text size"), h("div.d", "Makes all text, buttons and cards bigger or smaller. Also on the Aa button at the top.")),
+    box.replaceChildren(cardHead("Display", "monitor"),
+      h("div.opt", h("div", h("div.t", "Text size"), h("div.d", "Makes all text, buttons and cards bigger or smaller. Also on the Aa button at the top.")),
         h("div.seg", TEXT_SIZES.map(([v, l]) => h("button" + (+cur.text_scale === v ? ".on" : ""), { "aria-pressed": +cur.text_scale === v,
           onclick: () => { ui.text_scale = v; Theme.set({ text_scale: v }); draw(); } }, l)))),
+      h("div.opt", h("div", h("div.t", "Reduce animations"), h("div.d", "Shows simple fades instead of moving effects (like the health dial filling up). RigLab also follows Windows' own 'Animation effects' setting.")),
+        switchEl(!!cur.reduce_motion, (v) => { ui.reduce_motion = v; Theme.set({ reduce_motion: v }); })),
       h("div.opt", h("div", h("div.t", "Open RigLab on"), h("div.d", "The page you see when the app starts.")),
         h("select", { onchange: e => { ui.start_page = e.target.value; App.api.ui_set({ start_page: e.target.value }); } },
-          [["home", "Home"], ["dashboard", isSimple() ? "PC Health" : "Dashboard"], ["last", "Last page I used"]].map(([v, l]) => h("option", { value: v, selected: (ui.start_page || "home") === v }, l)))));
+          [["home", "Home"], ["dashboard", isSimple() ? "PC Health" : "Dashboard"], ["last", "Last page I used"]].map(([v, l]) => h("option", { value: v, selected: (ui.start_page || "home") === v }, l)))),
+      h("div.small.muted", { style: { paddingTop: "8px" } }, "Themes and colours are on the ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("themes"); } }, "Themes"), " page."));
   };
   draw();
   return box;
@@ -283,13 +293,15 @@ function appearanceCard(c) {
 function helpCard() {
   const box = h("div.card");
   const draw = async () => {
-    let w = { on: false };
-    try { w = await App.api.weekly_state(); } catch { /* preview */ }
-    box.replaceChildren(cardHead("Help and regular checks", "info"),
+    let w = { on: false }, a = { on: false };
+    try { w = await App.api.weekly_state(); a = await App.api.autostart_state(); } catch { /* preview */ }
+    box.replaceChildren(cardHead("Start-up, help and regular checks", "info"),
       h("div.opt", h("div", h("div.t", "Walkthrough"), h("div.d", "A short tour of the main screen.")),
         h("button.btn.sm", { onclick: () => Tour.start() }, icon("play"), "Replay the walkthrough")),
       h("div.opt", h("div", h("div.t", "Tips"), h("div.d", "The tips at the top of each page, including ones you chose not to show again.")),
         h("button.btn.sm", { onclick: async () => { await Tips.reset(); toast("Tips will show again on each page"); } }, icon("refresh"), "Show tips again")),
+      switchRow("autostart.set", a.on, async (v) => { const r = await App.api.autostart_set(v); toast(r.msg, !r.ok); return !!r.ok; },
+        { always: true, desc: "Starts RigLab in the tray when you sign in, so your lights, fans and overlay come back after a restart." }),
       switchRow("weekly.set", w.on, async (v) => { const r = await App.api.weekly_set(v); toast(r.msg, !r.ok); return !!r.ok; },
         { always: true, desc: "Runs a quick check every Sunday at 7 pm and shows your score in a notification. Off unless you turn it on." }));
   };
@@ -325,7 +337,7 @@ App.pages.settings = {
     const save = async () => { await App.api.save_settings(c); try { App.info = await App.api.info(); } catch { /* keep old */ } toast("Settings saved"); };
     el.append(pageHead("Settings", null, h("button.btn.primary", { onclick: save }, icon("check"), "Save")));
     el.append(viewCard());
-    el.append(h("div.mt", appearanceCard(c)));
+    el.append(h("div.mt", displayCard(c)));
     const general = [
       h("div.opt", h("div", h("div.t", S ? "Keep RigLab running when I close the window" : "Keep running in the tray"), h("div.d", S ? "Temperature warnings and your fan settings keep working. RigLab sits by the clock." : "Closing the window keeps alerts and fan curves working.")), switchEl(c.minimize_to_tray, v => { c.minimize_to_tray = v; })),
       h("div.opt", h("div", h("div.t", S ? "Start hidden by the clock" : "Start minimised")), switchEl(c.start_minimized, v => { c.start_minimized = v; }))];

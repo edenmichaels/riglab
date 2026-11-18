@@ -17,13 +17,14 @@ const NAV = [
   ["home", "Home", "home", "Home"],
   ["label", "Monitor", null, "My PC"],
   ["dashboard", "Dashboard", "dash", "PC Health"],
-  ["explain", "PC summary", "chip", "My PC explained"],
+  ["explain", "PC summary", "chip", "PC Info"],
   ["sensors", "Sensors", "pulse"],
   ["hardware", "Hardware", "chip"],
   ["crashes", "Crash Center", "alert", "Crashes & freezes"],
   ["label", "Test", null, "Tools"],
   ["benchmark", "Benchmark", "bench"],
   ["stress", "Stress test", "flame"],
+  ["netspeed", "Network speed test", "net"],
   ["label", "Control"],
   ["overclock", "Overclocking", "bolt"],
   ["tweaks", "Tweaks", "sliders", "Performance Tweaks"],
@@ -31,9 +32,12 @@ const NAV = [
   ["cooling", "Cooling", "fan", "Fans"],
   ["lighting", "Lighting", "light", "Lights"],
   ["benchmark", null, "bench", "Speed test"],
+  ["netspeed", null, "net", "Internet speed"],
+  ["tools", "All tools", "grid", "More tools"],
   ["label", "App", null, "RigLab"],
   ["history", "Change history", "undo", "Change history"],
   ["health", "RigLab setup", "heart"],
+  ["themes", "Themes", "palette", "Themes"],
   ["settings", "Settings", "gear", "Settings"],
 ];
 
@@ -43,11 +47,11 @@ function navItems() {
 }
 
 /* Switches instantly (no restart): redraws the menu and the current page, keeping the same tab. Saved as ui.view. */
-async function setView(v) {
+async function setView(v, stay = true) {
   App.view = v === "advanced" ? "advanced" : "simple";
   drawNav();
   drawTopbar();
-  if (App.pageId) go(App.pageId);
+  if (stay && App.pageId) go(App.pageId);
   try { await App.api.ui_set({ view: App.view }); } catch { /* preview */ }
 }
 
@@ -59,6 +63,7 @@ function drawTopbar() {
   box.replaceChildren(
     App.demo ? h("div.demo-tag", "Preview mode · simulated data") : null,
     h("div.spacer"),
+    UndoBtn.el(),
     h("span.small.muted", { style: { marginRight: "4px" } }, "View:"),
     h("div.seg.seg-sm", { role: "group", "aria-label": "Simple or Advanced view" },
       b("simple", "Simple", "Plain words, traffic lights, risky settings hidden"),
@@ -105,6 +110,7 @@ const Theme = {
     const d = document.documentElement;
     d.dataset.theme = this.mode();
     d.dataset.accent = this.cur.accent || "theme";
+    d.classList.toggle("reduce-motion", !!this.cur.reduce_motion);
     const z = TEXT_SIZES.some(([v]) => v === +this.cur.text_scale) ? +this.cur.text_scale : 1;
     this.cur.text_scale = z;
     d.style.setProperty("--zoom", z);
@@ -167,6 +173,7 @@ function go(id, opts = {}) {
   if (App.snap && P.tick) P.tick(App.snap);
   if (opts.focus) Promise.resolve(r).then(() => setTimeout(() => {
     const a = $(`[data-anchor="${opts.focus}"]`, el);
+    for (let d = a && a.closest("details"); d; d = d.parentElement && d.parentElement.closest("details")) d.open = true;
     if (a) { a.scrollIntoView({ block: "start", behavior: "smooth" }); a.classList.add("flash"); setTimeout(() => a.classList.remove("flash"), 2200); }
   }, 350));
 }
@@ -204,7 +211,7 @@ async function start() {
   else { App.api = new DemoApi(); App.demo = true; }
   App.info = await App.api.info();
   const ui = App.info.ui || {};
-  Theme.apply({ theme: ui.theme || Theme.cur.theme, accent: ui.accent || Theme.cur.accent, text_scale: ui.text_scale || 1 });
+  Theme.apply({ theme: ui.theme || Theme.cur.theme, accent: ui.accent || Theme.cur.accent, text_scale: ui.text_scale || 1, reduce_motion: !!ui.reduce_motion });
   App.view = (App.info.view || ui.view) === "advanced" ? "advanced" : "simple";
   buildShell();
   $("#ver").textContent = "v" + App.info.version;
@@ -224,3 +231,61 @@ let started = false;
 const boot = () => { if (!started) { started = true; start(); } };
 window.addEventListener("pywebviewready", boot);
 window.addEventListener("load", () => setTimeout(() => { if (!window.pywebview) boot(); }, 700));
+
+/* ------------------------------------------------------------------ central Undo (top bar)
+   Undo = the newest change that can be undone. The arrow lists recent changes from Change history, each with
+   its own Undo. Greyed out when there's nothing to undo. Medium/High risk changes ask first. */
+const UndoBtn = {
+  sum: null, box: null, busy: false,
+  el() {
+    this.box = this.box || h("div.undo-split");
+    this.render();
+    this.refresh();
+    return this.box;
+  },
+  async refresh() {
+    try { this.sum = await App.api.changes_summary(); } catch { this.sum = null; }
+    this.render();
+  },
+  render() {
+    if (!this.box) return;
+    const last = this.sum && this.sum.last;
+    const main = h("button.btn.sm.undo-main", { disabled: !last || this.busy, "aria-label": last ? "Undo: " + last.title : "Nothing to undo",
+      title: last ? "Undo: " + last.title : "Nothing to undo yet", onclick: () => last && this.undo(last) }, icon("undo"), "Undo");
+    const caret = h("button.btn.sm.undo-caret", { "aria-label": "Recent changes", title: "Recent changes", "aria-haspopup": "menu",
+      disabled: !(this.sum && this.sum.recent && this.sum.recent.length), onclick: (e) => this.menu(e.currentTarget) }, "▾");
+    this.box.replaceChildren(main, caret);
+  },
+  async undo(e) {
+    if (["Medium", "High"].includes(e.risk)) {
+      const ok = await modal({ title: "Undo this change?", body: [h("p", h("b", e.title)), h("p", `This was a ${e.risk.toLowerCase()} risk change. Undoing it puts the setting back the way it was before.`)],
+        buttons: [{ label: "Cancel", value: false }, { label: "Undo it", value: true, cls: "primary" }] });
+      if (!ok) return;
+    }
+    this.busy = true; this.render();
+    let r;
+    try { r = await App.api.change_undo(e.id); } catch (x) { r = { ok: false, msg: String(x) }; }
+    this.busy = false;
+    toast(r.msg, !r.ok);
+    if (r.ok && e.kind === "appearance") {           // put the old theme / text size back on screen too
+      try { App.info = await App.api.info(); Theme.apply(App.info.ui || {}); } catch { /* preview */ }
+    }
+    await this.refresh();
+    if (r.ok && App.pageId) go(App.pageId);
+  },
+  menu(anchor) {
+    const old = $(".undo-menu"); if (old) { old.remove(); return; }
+    const z = +Theme.cur.text_scale || 1, r = anchor.getBoundingClientRect();
+    const when = (t) => new Date(t * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+    const menu = h("div.undo-menu.aa-menu", { role: "menu", style: { top: (r.bottom / z + 6) + "px", right: (document.documentElement.clientWidth - r.right) / z + "px" } },
+      h("div.small.muted", { style: { padding: "4px 8px 6px" } }, "Recent changes"),
+      (this.sum.recent || []).map(e => h("div.undo-row", { role: "menuitem" },
+        h("div", { style: { minWidth: 0 } }, h("div.undo-t", e.title), h("div.small.muted", when(e.time) + (e.risk && !["None", "Low"].includes(e.risk) ? ` · ${e.risk} risk` : ""))),
+        e.undoable ? h("button.btn.sm", { onclick: () => { menu.remove(); this.undo(e); } }, "Undo")
+          : h("span.small.muted", e.undone_by ? "Undone" : e.source === "undo" ? "" : "Can't undo"))),
+      h("button.btn.sm.ghost", { style: { width: "100%", marginTop: "6px" }, onclick: () => { menu.remove(); go("history"); } }, "See all in Change history"));
+    document.body.append(menu);
+    setTimeout(() => document.addEventListener("click", function off(ev) { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener("click", off); } }), 0);
+  },
+};
+setInterval(() => { if (!document.hidden && App.api) UndoBtn.refresh(); }, 5000);

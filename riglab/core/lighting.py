@@ -275,6 +275,8 @@ class LightingEngine:
                 pass
             self._last.clear()
             self._fx = None
+            if keys:                                    # remembered for the after-boot rescan
+                self.L["known_devices"] = list(keys)
             self.cfg.save()
 
     def invalidate(self):

@@ -16,7 +16,7 @@ from dataclasses import asdict
 
 from datetime import datetime, timezone
 
-from .core import bench, crashes, diagnostics, explain, health, healthcheck, lhm_setup, oc, pcinfo, presets, report, schedule, storage, sysinfo, tweaks
+from .core import bench, crashes, diagnostics, explain, health, healthcheck, lhm_setup, netspeed, oc, pcinfo, presets, report, schedule, storage, sysinfo, tweaks
 from .core.changes import ChangeLog
 from .core.config import APP_VERSION, app_dir
 from .core.fans import PRESETS
@@ -55,6 +55,8 @@ class Api:
         self._health = health.HealthStore()
         self._job = None
         self._big = None              # largest-files scan
+        self._net = None              # internet speed test job
+        self._net_hist = netspeed.History()
         self.startup_notes_list = []
 
     # ------------------------------------------------------------------ general
@@ -64,10 +66,17 @@ class Api:
                 "view": self._cfg.data.get("ui", {}).get("view", "simple"), "lights": explain.lights(self._cfg.data.get("alerts"))}
 
     def ui_set(self, values):
-        """Appearance + start page (saved immediately, no Save button needed)."""
-        self._cfg.data.setdefault("ui", {}).update(ui_values(values))
+        """Appearance + start page (saved immediately, no Save button needed). Theme, colour, text size and
+        animation changes go in Change history (clicking through several themes = one entry, one Undo)."""
+        ui = self._cfg.data.setdefault("ui", {})
+        new = ui_values(values)
+        watched = {k: v for k, v in new.items() if k in APPEARANCE_KEYS and ui.get(k) != v}
+        before = {k: ui.get(k) for k in watched}
+        ui.update(new)
         self._cfg.save()
-        return self._cfg.data["ui"]
+        if watched and not (values or {}).get("_undo"):
+            self._log("appearance", "Look changed: " + ", ".join(APPEARANCE_KEYS[k] for k in watched), before=before, after=watched, merge="appearance")
+        return ui
 
     def snapshot(self):
         h = self._hub
@@ -302,8 +311,9 @@ class Api:
         ui = self._cfg.data.get("ui", {})
         return {"stats": list(o.get("stats") or ["fps"]), "layout": o.get("layout", "horizontal"), "size": o.get("size", "m"),
                 "opacity": float(o.get("opacity", 0.85)), "text_color": o.get("text_color", "theme"), "fps_color": o.get("fps_color", "auto"),
-                "locked": bool(o.get("locked", True)), "minimised": bool(o.get("minimised")), "theme": ui.get("theme", "dark"),
-                "edit": not o.get("locked", True), "hotkey": overlay.hotkey_label(o.get("hotkey", ""))}
+                "locked": not self._app._ov_editing, "minimised": bool(o.get("minimised")), "theme": ui.get("theme", "dark"),
+                "edit": self._app._ov_editing, "editing": self._app._ov_editing, "hotkey": overlay.hotkey_label(o.get("hotkey", "")),
+                "move_hold": o.get("move_hold", ""), "visible": self._app._ov_should_show()}
 
     def overlay_data(self):
         """Just the readings the overlay shows (much lighter than snapshot)."""
@@ -320,6 +330,15 @@ class Api:
     def overlay_edit(self, on):
         return self._app.overlay_edit(bool(on))
 
+    def overlay_status(self):
+        return self._app.overlay_status()
+
+    def overlay_log(self, msg):
+        """The overlay page reports its own script errors here (they used to vanish silently)."""
+        self._app._ov_last_error = str(msg)[:300]
+        log.warning("overlay page: %s", msg)
+        return True
+
     def overlay_lock(self, locked):
         return self._app.overlay_lock(bool(locked))
 
@@ -334,7 +353,7 @@ class Api:
         o = self._cfg["overlay"]
         new = dict(o)
         for k, v in (values or {}).items():
-            if k in ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color"):
+            if k in ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color", "move_hold"):
                 new[k] = v
         if values.get("preset") in overlay.PRESETS:
             new = overlay.apply_preset(new, values["preset"])
@@ -342,22 +361,28 @@ class Api:
         hotkey_changed = new.get("hotkey") != o.get("hotkey")
         if new.get("hotkey") and not overlay.parse_hotkey(new["hotkey"]):
             new["hotkey"] = o.get("hotkey", "")
+        before = {k: o.get(k) for k in ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color", "move_hold")}
         o.clear()
         o.update(new)
         self._cfg.save()
         self._app._ov_size = None
+        self._app._ov_hold_vks = overlay.parse_hold(o.get("move_hold", "")) or []
         self._app.apply_overlay()
         ok = True
         if hotkey_changed:
             ok = bool(self._app.overlay_hotkey()) or not o.get("hotkey")
+            self._app._ov_hotkey_ok = ok
+        after = {k: o.get(k) for k in before}
+        if after != before and not values.get("_undo"):
+            self._log("overlay", "Overlay settings changed", before=before, after=after, merge="overlay")
         return {"overlay": o, "hotkey_ok": ok}
 
     def overlay_corner(self, corner):
         self._app.overlay_corner(corner)
         return True
 
-    def overlay_fit(self, w, h):
-        self._app.overlay_fit(w, h)
+    def overlay_fit(self, w, h, dpr=None):
+        self._app.overlay_fit(w, h, dpr)
         return True
 
     def overlay_fps(self):
@@ -620,11 +645,20 @@ class Api:
         return self.light_state()
 
     def light_set(self, state):
+        before = dict(self._light.L["state"])
         self._light.set_state(**state)
+        after = dict(self._light.L["state"])
+        if after != before:
+            self._log("lighting", f"Lights: {after.get('effect', 'changed')}", before={"state": before}, after={"state": after}, merge="lighting")
         return True
 
     def light_device(self, key, settings):
+        ds = self._light.dev_settings(key)
+        before = {k: ds.get(k) for k in settings}
         self._light.set_device(key, **settings)
+        if before != {k: ds.get(k) for k in settings}:
+            self._log("light_device", f"Lights: {key} settings", before={"key": key, "settings": before}, after={"key": key, "settings": settings},
+                      merge="light_device:" + key)
         return self.light_state()
 
     def light_zone(self, key, zone, size=None, per=None, empty=None):
@@ -713,7 +747,7 @@ class Api:
         return "\n".join(lines)
 
     def rgb_off(self):           # used by the dashboard button
-        self._light.set_state(effect="Off")
+        self.light_set({"effect": "Off"})
         return "ok"
 
     # ------------------------------------------------------------------ fans
@@ -1198,6 +1232,116 @@ class Api:
         self._log("update_cache", f"Removed {_size(b)} of old Windows update downloads", undo=False, detail=f"{n} files")
         return {"ok": True, "bytes": b, "files": n, "msg": f"Freed {_size(b)}"}
 
+    # ------------------------------------------------------------------ internet speed test
+    def netspeed_start(self):
+        """Run the speed test in the background (screen polls netspeed_status). Uses Cloudflare's test servers."""
+        if self._net and self._net.running():
+            return self._net.status()
+        H = healthcheck
+
+        def conn(ctx):
+            ctx.data["conn"] = netspeed.connection_info()
+            if not H.is_online():
+                ctx.data["offline"] = True
+            return []
+
+        def server(ctx):
+            if not ctx.data.get("offline"):
+                ctx.data.update(netspeed.meta())
+            return []
+
+        def ping(ctx):
+            if ctx.data.get("offline"):
+                return []
+            n = 10
+            rc, out = ctx.run(["ping", "-n", str(n), "-w", "1000", netspeed.PING_HOST], timeout=40) if sys.platform == "win32" else (None, "")
+            p = netspeed.parse_ping(out, n)
+            times = p["times"]
+            if times:
+                ctx.data["loss"] = round(p["lost"] / n * 100, 1)
+            else:                                   # ICMP blocked on this network: measure delay over the web instead
+                times = netspeed.http_latency(cancelled=ctx.cancelled)
+                ctx.data["loss"] = None
+            ctx.data["ping"], ctx.data["jitter"] = netspeed.ping_stats(times)
+            return []
+
+        def down(ctx):
+            if not ctx.data.get("offline"):
+                r = netspeed.transfer("down", cancelled=ctx.cancelled)
+                ctx.data["download"], ctx.data["down_bytes"] = r["mbps"], r["bytes"]
+            return []
+
+        def up(ctx):
+            if not ctx.data.get("offline"):
+                r = netspeed.transfer("up", cancelled=ctx.cancelled)
+                ctx.data["upload"], ctx.data["up_bytes"] = r["mbps"], r["bytes"]
+            return []
+
+        def finish(job):
+            d = dict(job.ctx.data)
+            r = {"time": time.time(), "offline": bool(d.get("offline")), **{k: d.get(k) for k in ("download", "upload", "ping", "jitter", "loss", "server", "isp", "ip", "conn")},
+                 "data_mb": round(((d.get("down_bytes") or 0) + (d.get("up_bytes") or 0)) / 1e6, 1)}
+            if not r["offline"] and r["download"] is None and r["upload"] is None:
+                r["error"] = "Cloudflare's test server didn't answer. Try again in a minute."
+            r["summary"] = netspeed.summary(r)
+            r["lights"] = {k: netspeed.light(k, r.get(k)) for k in netspeed.LIGHTS}
+            if not r["offline"] and not r.get("error"):
+                self._net_hist.add(r)
+            return r
+        S = H.Step
+        self._net = H.CheckJob("netspeed", [S("conn", "Checking your connection", 3, conn), S("server", "Finding the nearest test server", 2, server),
+                                            S("ping", "Measuring ping, jitter and packet loss", 11, ping), S("down", "Testing download speed", 10, down),
+                                            S("up", "Testing upload speed", 10, up)], finish=finish)
+        self._net.start()
+        return self._net.status()
+
+    def netspeed_status(self):
+        j = self._net
+        if not j:
+            return {"running": False, "result": None}
+        st = j.status()
+        st["partial"] = {k: v for k, v in (j.ctx.data if j.ctx else {}).items() if k in ("download", "upload", "ping", "jitter", "loss", "offline")}
+        return st
+
+    def netspeed_cancel(self):
+        if self._net and self._net.running():
+            self._net.cancel()
+            return True
+        return False
+
+    def netspeed_history(self):
+        return {"items": list(reversed(self._net_hist.items)), "note": netspeed.DATA_NOTE}
+
+    # ------------------------------------------------------------------ start with Windows
+    def autostart_state(self):
+        return {"on": bool(self._cfg.data.get("startup", {}).get("with_windows")), "task": schedule.autostart_on()}
+
+    def autostart_set(self, on, source="you"):
+        ok, msg = schedule.set_autostart(bool(on))
+        if ok:
+            was = self._cfg.data.setdefault("startup", {}).get("with_windows")
+            self._cfg.data["startup"]["with_windows"] = bool(on)
+            self._cfg.save()
+            self._log("autostart", "RigLab starts with Windows: " + ("on" if on else "off"), before={"on": bool(was)}, after={"on": bool(on)},
+                      source=source, detail=msg)
+        return {"ok": ok, "msg": ("RigLab will start when you sign in to Windows." if on else "RigLab won't start with Windows.") if ok
+                else f"Task Scheduler didn't accept it: {msg}"}
+
+    def autostart_first_run(self):
+        """First start of 3.11: turn on start-with-Windows once (the after-boot lighting rescan needs it)."""
+        st = self._cfg.data.setdefault("startup", {})
+        if st.get("with_windows") is not None or sys.platform != "win32":
+            return None
+        r = self.autostart_set(True, source="auto")
+        if r["ok"]:
+            self.startup_notes_list.append({"kind": "light", "title": "Starts with Windows",
+                                            "text": "RigLab now starts when you sign in, so your lights come back after a restart. "
+                                                    "You can turn this off in Settings, or undo it in Change history.", "page": "settings"})
+        else:
+            st["with_windows"] = False
+            self._cfg.save()
+        return r
+
     # ------------------------------------------------------------------ weekly check
     def weekly_state(self):
         return {"on": bool(self._cfg.data.get("health", {}).get("weekly")), "scheduled": schedule.is_scheduled()}
@@ -1223,6 +1367,10 @@ class Api:
 
     def changes_list(self):
         return self._changes.list()
+
+    def changes_summary(self):
+        """For the Undo button in the top bar."""
+        return self._changes.summary()
 
     def change_undo(self, cid):
         e = self._changes.get(cid)
@@ -1259,6 +1407,23 @@ class Api:
             elif k == "gpu_tune":
                 if not self._gpu.reset():
                     raise RuntimeError("The graphics card didn't accept the reset")
+            elif k == "lighting":
+                self._light.set_state(**b["state"])
+            elif k == "light_device":
+                self._light.set_device(b["key"], **b["settings"])
+            elif k == "settings":
+                self._save_settings(b)
+                self._cfg.save()
+            elif k == "appearance":
+                self.ui_set(dict(b, _undo=True))
+            elif k == "overlay":
+                self.overlay_set(dict(b, _undo=True))
+            elif k == "autostart":
+                ok, msg = schedule.set_autostart(bool(b["on"]))
+                if not ok:
+                    raise RuntimeError(msg)
+                self._cfg.data.setdefault("startup", {})["with_windows"] = bool(b["on"])
+                self._cfg.save()
             elif k == "weekly":
                 ok, msg = schedule.set_weekly(bool(b["on"]))
                 if not ok:
@@ -1285,6 +1450,17 @@ class Api:
 
     def save_settings(self, data):
         # the overlay saves itself as you change it (overlay_set), so a stale copy here never overwrites it
+        import copy
+        keys = ("alerts", "logging", "openrgb", "liquidctl", "minimize_to_tray", "poll_interval_ms", "start_minimized")
+        before = {k: copy.deepcopy(self._cfg.data.get(k)) for k in keys}
+        self._save_settings(data)
+        changed = {k: before[k] for k in keys if self._cfg.data.get(k) != before[k]}
+        if changed and not (data or {}).get("_undo"):
+            self._log("settings", "Settings changed: " + ", ".join(SETTING_NAMES.get(k, k) for k in changed), before=changed,
+                      after={k: copy.deepcopy(self._cfg.data.get(k)) for k in changed})
+        return True
+
+    def _save_settings(self, data):
         for k in ("alerts", "logging", "openrgb", "liquidctl"):
             if k in data:
                 self._cfg[k].update(data[k])
@@ -1329,6 +1505,9 @@ def _size(b):
         b /= 1024
 
 
+APPEARANCE_KEYS = {"theme": "theme", "accent": "highlight colour", "text_scale": "text size", "reduce_motion": "animations"}
+SETTING_NAMES = {"alerts": "too-hot warnings", "logging": "logging", "openrgb": "lighting service", "liquidctl": "fan hubs",
+                 "minimize_to_tray": "keep running", "poll_interval_ms": "sensor refresh", "start_minimized": "start hidden"}
 THEME_IDS = ("dark", "light", "system", "dracula", "nord", "catppuccin", "gruvbox", "solarized", "tokyo", "onedark", "contrast")
 ACCENTS = ("theme", "cyan", "violet", "emerald", "amber", "crimson", "ocean", "mono")
 TEXT_SCALES = (0.8, 1, 1.25, 1.5)
@@ -1349,6 +1528,8 @@ def ui_values(values: dict) -> dict:
         elif k == "text_scale" and isinstance(v, (int, float)) and not isinstance(v, bool):
             out[k] = min(TEXT_SCALES, key=lambda x: abs(x - float(v)))
         elif k == "tour_done" and isinstance(v, bool):
+            out[k] = v
+        elif k == "reduce_motion" and isinstance(v, bool):
             out[k] = v
         elif k == "tips_hidden" and isinstance(v, list):
             out[k] = [str(x)[:40] for x in v][:100]

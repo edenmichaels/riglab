@@ -202,6 +202,8 @@ const Health = {
       this.job = st;
       if (!st.running) {
         if (st.kind !== "repair" && st.result) {
+          this.prev = this.last && this.last.score != null ? this.last.score : null;
+          this.finishedAt = Date.now();
           this.last = st.result;
           if (st.result.score != null) this.history.push({ time: st.result.time, score: st.result.score, kind: st.result.kind });
           toast(st.result.summary);
@@ -226,44 +228,138 @@ function ago(t) {
   return `${Math.round(s / 86400)} days ago`;
 }
 
-/* healthDial({ link: true }) - a big circular 0-100 dial. Colour follows the traffic-light rules.
-   link: clicking the dial opens PC Health. Both pages use this one component, so they always match. */
+/* healthDial({ link, both }) - the 0-100 dial on Home and PC Health (one component, so they always match).
+   Animation: while a check runs, a glowing arc sweeps round the ring and the progress flows smoothly; when the
+   result arrives the arc fills from the old score (0 the first time) with an ease-out, the number counts up and
+   the colour blends red -> yellow -> green, settling on the status colour; then a slow glow "breathes" (calm for
+   green, more noticeable for yellow/red). Sweeps/glow/ripple are CSS transform/opacity animations (handled by the
+   GPU); JavaScript only runs while filling or while a check is running, and everything pauses when the dial is
+   off-screen or the window is minimised. "Reduce animations" (Settings) or Windows' animation setting = a fade. */
+let dialSeq = 0;
+function dialReduced() {
+  return document.documentElement.classList.contains("reduce-motion") || matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+function hexRgb(c) {
+  const m = /^#?([0-9a-f]{6})$/i.exec((c || "").trim());
+  if (!m) return [128, 128, 128];
+  const n = parseInt(m[1], 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+function mixRgb(a, b, t) { return a.map((x, i) => Math.round(x + (b[i] - x) * t)); }
+function dialBlend(v, to) {
+  // colour while filling: red -> yellow -> green, but only as far as the final score's own colour (a 70 never flashes green)
+  const bad = hexRgb(css("--bad")), warn = hexRgb(css("--warn")), good = hexRgb(css("--good"));
+  const st = DIAL_STATE(to);
+  if (st === "bad") return bad;
+  if (st === "warn") return mixRgb(bad, warn, Math.min(1, v / Math.max(1, to)));
+  return v < 50 ? mixRgb(bad, warn, v / 50) : mixRgb(warn, good, Math.min(1, (v - 50) / Math.max(1, to - 50)));
+}
+const DIAL_STATE = (v) => v == null ? "none" : v >= 80 ? "good" : v >= 50 ? "warn" : "bad";
+
 function healthDial(opts = {}) {
+  const id = ++dialSeq, R = 88, C = 2 * Math.PI * R;
   const box = h("div.hdial-wrap");
+  const ring = h("div.hdial" + (opts.link ? ".link" : ""), {
+    role: opts.link ? "button" : "img", tabIndex: opts.link ? 0 : null, title: opts.link ? "Open PC Health" : null,
+    onclick: opts.link ? () => go("dashboard") : null, onkeydown: opts.link ? (e) => { if (e.key === "Enter") go("dashboard"); } : null });
+  ring.innerHTML = `<div class="hd-glow"></div>
+    <svg class="hd-svg" viewBox="0 0 220 220" aria-hidden="true">
+      <circle class="hd-track" cx="110" cy="110" r="${R}" fill="none" stroke-width="16"/>
+      <circle class="hd-arc" cx="110" cy="110" r="${R}" fill="none" stroke-width="16" stroke-linecap="round" transform="rotate(-90 110 110)" stroke-dasharray="0 ${C}"/>
+      <g class="hd-sparks">${[0, 1, 2, 3].map(() => `<circle r="2.2" cx="110" cy="22" opacity="0"/>`).join("")}</g>
+    </svg>
+    <div class="hd-scan" aria-hidden="true"><svg viewBox="0 0 220 220"><defs><linearGradient id="hdc${id}" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="var(--accent)" stop-opacity="0"/><stop offset="1" stop-color="var(--accent)" stop-opacity="1"/></linearGradient></defs>
+      <circle cx="110" cy="110" r="${R}" fill="none" stroke="url(#hdc${id})" stroke-width="16" stroke-linecap="round" stroke-dasharray="120 ${C}" transform="rotate(-90 110 110)"/></svg></div>
+    <div class="hd-ripple"></div>
+    <div class="hdial-mid"><div class="hdial-num"><span class="n"></span><small>%</small></div><div class="hd-sub small muted"></div><div class="hdial-none">Not checked yet</div></div>`;
+  const $$ = (q) => ring.querySelector(q);
+  const MODES = ["running", "filling", "settled-good", "settled-warn", "settled-bad", "settled-none", "is-none"];
+  const mode = (c) => { ring.classList.remove(...MODES); ring.classList.add(c); };
+  const arc = $$(".hd-arc"), num = $$(".n"), sub = $$(".hd-sub"), sparks = [...ring.querySelectorAll(".hd-sparks circle")];
+  const say = h("div.hdial-say"), buttons = h("div");
+  box.append(ring, say, buttons);
+
+  const A = { mode: "none", shown: null, p: 0, from: 0, to: 0, t0: 0, raf: 0, visible: true, settledState: null };
+  const setArc = (v, rgb) => {
+    arc.setAttribute("stroke-dasharray", `${Math.max(0, Math.min(100, v)) / 100 * C} ${C}`);
+    if (rgb) { const c = `rgb(${rgb.join(",")})`; arc.style.stroke = c; ring.style.setProperty("--dial-c", c); }
+  };
+  const leading = (v) => { const a = (v / 100) * 2 * Math.PI - Math.PI / 2; return [110 + R * Math.cos(a), 110 + R * Math.sin(a)]; };
+  const settle = (v, ripple) => {
+    const st = DIAL_STATE(v);
+    A.mode = "settled"; A.shown = v; A.settledState = st;
+    setArc(v, hexRgb(css("--" + st)));
+    num.textContent = v; sub.textContent = "PC health";
+    mode("settled-" + st);
+    sparks.forEach(sp => sp.setAttribute("opacity", "0"));
+    if (ripple && !dialReduced()) { const r = $$(".hd-ripple"); r.classList.remove("go"); void r.offsetWidth; r.classList.add("go"); }
+  };
+  const frame = (t) => {
+    A.raf = 0;
+    if (!A.visible || document.hidden) return;                       // paused: resumes when seen again
+    if (A.mode === "running") {
+      const target = Math.max(A.p, ((Health.job && Health.job.progress) || 0) * 100);
+      A.p += (target - A.p) * 0.06 + (A.p < target + 3 && A.p < 99 ? 0.012 : 0);      // flows, never jumps
+      setArc(A.p);
+      num.textContent = Math.floor(A.p);
+      A.raf = requestAnimationFrame(frame);
+    } else if (A.mode === "filling") {
+      const k = Math.min(1, (t - A.t0) / 1600), e = 1 - Math.pow(1 - k, 3);   // fast start, gentle stop
+      const v = A.from + (A.to - A.from) * e;
+      const rgb = dialBlend(v, A.to);
+      setArc(v, rgb);
+      num.textContent = Math.round(v);
+      const [x, y] = leading(v);
+      sparks.forEach((sp, i) => {
+        const j = (t / 90 + i * 1.7) % 4, ang = i * 1.6 + t / 300;
+        sp.setAttribute("cx", (x + Math.cos(ang) * j * 2.2).toFixed(1));
+        sp.setAttribute("cy", (y + Math.sin(ang) * j * 2.2).toFixed(1));
+        sp.setAttribute("opacity", k < 0.95 ? (0.85 - j * 0.2).toFixed(2) : "0");
+        sp.setAttribute("fill", `rgb(${rgb.join(",")})`);
+      });
+      if (k < 1) A.raf = requestAnimationFrame(frame);
+      else settle(A.to, true);
+    }
+  };
+  const kick = () => { if (!A.raf && A.visible && !document.hidden && (A.mode === "running" || A.mode === "filling")) A.raf = requestAnimationFrame(frame); };
+
   let mounted = false;
   const draw = () => {
-    if (mounted && !box.isConnected) { Health.subs.delete(draw); return; }
+    if (mounted && !box.isConnected) { Health.subs.delete(draw); io.disconnect(); return; }
     if (box.isConnected) mounted = true;
     const r = Health.last, running = Health.running, job = Health.job || {};
-    const v = r && r.score != null ? r.score : null, st = running ? "none" : (r ? r.state : "none");
-    const R = 88, C = 2 * Math.PI * R, pct = running ? (job.progress || 0) : v == null ? 0 : v / 100;
-    const col = running ? "var(--accent)" : { good: "var(--good)", warn: "var(--warn)", bad: "var(--bad)", none: "var(--faint)" }[st];
-    const ring = h("div.hdial" + (opts.link ? ".link" : ""), {
-      role: opts.link ? "button" : null, tabIndex: opts.link ? 0 : null, title: opts.link ? "Open PC Health" : null,
-      onclick: opts.link ? () => go("dashboard") : null, onkeydown: opts.link ? (e) => { if (e.key === "Enter") go("dashboard"); } : null });
-    ring.innerHTML = `<svg viewBox="0 0 220 220" aria-hidden="true"><circle cx="110" cy="110" r="${R}" fill="none" stroke="var(--line)" stroke-width="16"/>
-      <circle cx="110" cy="110" r="${R}" fill="none" stroke="${col}" stroke-width="16" stroke-linecap="${pct > 0 ? "round" : "butt"}" transform="rotate(-90 110 110)"
-        stroke-dasharray="${C * pct} ${C}" style="transition:stroke-dasharray .8s, stroke .6s;filter:drop-shadow(0 0 8px ${col})"/></svg>`;
-    const mid = h("div.hdial-mid");
-    if (running) mid.append(h("div.hdial-num", { style: { color: "var(--accent)", fontSize: "44px" } }, Math.round((job.progress || 0) * 100), h("small", "%")),
-      h("div.small.muted", job.kind === "full" ? "Full check" : "Quick check"));
-    else if (v == null) mid.append(h("div.hdial-none", "Not checked yet"));
-    else mid.append(h("div.hdial-num", { style: { color: col } }, v, h("small", "%")), h("div.small.muted", "PC health"));
-    ring.append(mid);
+    const v = r && r.score != null ? r.score : null;
+    const reduced = dialReduced();
+    if (running) {
+      if (A.mode !== "running") { A.mode = "running"; A.p = (job.progress || 0) * 100; mode("running"); arc.style.stroke = "var(--accent)"; }
+      sub.textContent = job.kind === "full" ? "Full check" : "Quick check";
+      if (reduced) { A.p = (job.progress || 0) * 100; setArc(A.p); num.textContent = Math.floor(A.p); } else kick();
+    } else if (v == null) {
+      A.mode = "none"; setArc(0); mode("is-none");
+    } else {
+      const fresh = (Health.finishedAt && Date.now() - Health.finishedAt < 2500 && A.shown !== v) || A.shown == null;   // new result, or first time shown: fill up
+      if (A.mode === "running" || (fresh && A.mode !== "filling")) {
+        const from = A.mode === "running" ? (Health.prev ?? 0) : A.shown ?? 0;
+        if (reduced) { settle(v, false); ring.classList.add("fade-in"); setTimeout(() => ring.classList.remove("fade-in"), 600); }
+        else { A.mode = "filling"; A.from = from; A.to = v; A.t0 = performance.now(); mode("filling"); kick(); }
+      } else if (A.mode !== "filling" && (A.mode !== "settled" || A.shown !== v || A.settledState !== DIAL_STATE(v))) settle(v, false);
+    }
     ring.setAttribute("aria-label", running ? "Checking your PC" : v == null ? "PC health: not checked yet" : `PC health ${v} out of 100`);
-    const both = opts.both;          // PC Health shows Quick and Full; Home keeps it to one button
-    const buttons = running ? h("div.stack", { style: { gap: "8px", alignItems: "center" } },
+    say.textContent = running ? "Checking your PC. You can keep using it while this runs." : v == null ? "Run a quick check to get a health score for your PC." : r.summary;
+    buttons.replaceChildren(running ? h("div.stack", { style: { gap: "8px", alignItems: "center" } },
         h("div.small", (job.step || "Starting…") + (job.count ? ` (step ${job.index} of ${job.count})` : "")),
         h("div.small.muted", job.eta_text || ""),
         h("button.btn.sm", { onclick: () => Health.cancel() }, icon("stop"), "Cancel"))
       : h("div.row", { style: { gap: "10px", justifyContent: "center", flexWrap: "wrap" } },
         v != null ? h("span.small.muted", (r.kind === "full" ? "Full check " : "Quick check ") + ago(r.time) + ".") : null,
         actionBtn("health.quick", () => Health.run("quick"), { cls: v == null ? "primary" : "sm", icon: "heart", always: true, label: v == null ? "Run a quick check" : "Quick check" }),
-        both ? actionBtn("health.full", () => Health.run("full"), { cls: "sm", icon: "search", always: true }) : null);
-    box.replaceChildren(ring,
-      h("div.hdial-say", running ? "Checking your PC. You can keep using it while this runs." : v == null ? "Run a quick check to get a health score for your PC." : r.summary),
-      buttons);
+        opts.both ? actionBtn("health.full", () => Health.run("full"), { cls: "sm", icon: "search", always: true }) : null));
   };
+  // pause everything when the dial is scrolled out of view or the window is minimised (no CPU/GPU spent)
+  const io = new IntersectionObserver((es) => { A.visible = es.some(e => e.isIntersecting); ring.classList.toggle("paused", !A.visible); kick(); });
+  io.observe(ring);
+  document.addEventListener("visibilitychange", () => { ring.classList.toggle("paused", document.hidden || !A.visible); kick(); });
   Health.subs.add(draw);
   draw();
   Health.load();
@@ -317,4 +413,18 @@ async function presetPanel(pid, done) {
   if (r == null) return;
   toast(r.msg, !r.ok);
   if (done) done(r);
+}
+
+// ------------------------------------------------------------------ Simple view: a door into Advanced view
+/* A card for a feature that's only shown in Advanced view: switches view and goes straight there. */
+function openAdvanced(page, opts = {}) {
+  if (opts.tab && App.pages[page]) App.pages[page].tab = opts.tab;
+  setView("advanced", false).then(() => go(page, opts.focus ? { focus: opts.focus } : {}));
+}
+function advLink(name, page, opts = {}) {
+  return h("div.adv-link", { role: "button", tabIndex: 0, "data-adv": page + (opts.focus ? "#" + opts.focus : ""),
+    onclick: () => openAdvanced(page, opts), onkeydown: (e) => { if (e.key === "Enter") openAdvanced(page, opts); } },
+    h("span.icon-badge", icon(opts.icon || "sliders")),
+    h("div", { style: { minWidth: 0 } }, h("div", h("b", name), " - this is an advanced feature."), opts.desc ? h("div.small.muted", opts.desc) : null),
+    h("span.adv-go", "Open in Advanced view →"));
 }

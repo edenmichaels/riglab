@@ -1,5 +1,36 @@
-RigLab 3.10.0
+RigLab 3.11.0
 =============
+
+NEW IN 3.11.0
+  In-game overlay (fixed)
+  - Why it kept disappearing: the FPS-only counter hid itself whenever the window in front wasn't the one
+    drawing frames (launchers, anti-cheat, Store games); borderless games could cover it because RigLab never
+    put it back on top; a Windows setting could make the click-through window invisible; and sizes were
+    mixed up at 125% / 150% display scaling. All fixed. It now stays on top (checked every 2 seconds), uses
+    the busiest game if the front window isn't drawing, and sizes itself correctly at any scaling.
+  - Clicks go straight through it to your game. To move it, hold Ctrl+Alt (changeable) and drag, or press
+    "Edit position" in Settings > In-game overlay. You see an outline and a drag bar; it locks again after.
+  - Exclusive fullscreen games: RigLab tells you once, in plain words, to switch the game to Borderless or
+    Windowed fullscreen (Windows doesn't let anything draw over exclusive fullscreen).
+  - The status line in Settings shows if it's hidden by the show/hide key or if the key is taken.
+  Lighting after a restart
+  - The first time RigLab starts after Windows boots, it looks for your lighting devices again (for up to
+    about a minute) and reapplies your last effect. If a device is missing you get a quiet notice.
+  - RigLab now starts with Windows (minimised, no admin pop-up). Turn it off in Settings > Start-up.
+  New
+  - Internet speed (Tools): download, upload, ping, jitter, packet loss, server, internet provider, public
+    IP (hidden until you press Show), cable or Wi-Fi with signal and band, a plain summary and past results.
+    Uses Cloudflare's speed test servers. A test uses some data (up to about 300 MB on fast internet).
+  - Undo button in the top bar: undoes your last change. The arrow lists recent changes. Covers presets,
+    tweaks, fans, power plans, start-up apps, Fix it, lights, overlay, settings and themes.
+  - Themes have their own page (RigLab > Themes).
+  - More tools / All tools: every feature in one list. Advanced features show a card in Simple view that
+    takes you straight there.
+  - Smoother health dial: a scanning glow while checking, then it fills, counts up and changes colour.
+    Settings > Display > Reduce animations (RigLab also follows Windows' animation setting).
+  Changed
+  - "My PC Explained" is now "PC Info". The "One-click for gamers" card is gone (use the Gaming preset on
+    Home or "Put games first"). "How hard should my PC work" is now at the top of Performance Tweaks.
 
 NEW IN 3.10.0
   Help
@@ -66,7 +97,7 @@ INSTALL (once)
   2. Open the extracted folder and double-click  "Build RigLab Installer.bat".
      The first build takes 5-10 minutes; later builds take 1-2.
      It sets up everything it needs by itself and keeps it in %LOCALAPPDATA%\RigLab-build.
-  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.10.0.exe.
+  3. When it finishes, the "Installer" folder opens with RigLab-Setup-3.11.0.exe.
      Double-click it: RigLab installs to Program Files with Start-menu and desktop shortcuts.
 
 UPDATE
