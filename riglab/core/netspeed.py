@@ -78,6 +78,14 @@ def parse_ping(text: str, sent: int) -> dict:
     return {"times": times, "sent": sent, "lost": lost}
 
 
+def ping_text(run, n: int = 10) -> str:
+    """Windows' own ping to 1.1.1.1 (run = the job's command runner). Empty when not on Windows."""
+    if sys.platform != "win32":
+        return ""
+    rc, out = run(["ping", "-n", str(n), "-w", "1000", PING_HOST], timeout=40)
+    return out or ""
+
+
 def ping_stats(times: list[float]) -> tuple[float | None, float | None]:
     """(ping = median, jitter = average change between one ping and the next)."""
     if not times:

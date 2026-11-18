@@ -1254,8 +1254,7 @@ class Api:
             if ctx.data.get("offline"):
                 return []
             n = 10
-            rc, out = ctx.run(["ping", "-n", str(n), "-w", "1000", netspeed.PING_HOST], timeout=40) if sys.platform == "win32" else (None, "")
-            p = netspeed.parse_ping(out, n)
+            p = netspeed.parse_ping(netspeed.ping_text(ctx.run, n), n)
             times = p["times"]
             if times:
                 ctx.data["loss"] = round(p["lost"] / n * 100, 1)

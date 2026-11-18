@@ -205,7 +205,7 @@ def _speed_api(tmp_path):
 
 
 def _wait(a):
-    for _ in range(200):
+    for _ in range(500):
         st = a.netspeed_status()
         if not st["running"]:
             return st
@@ -231,6 +231,7 @@ def test_speed_test_online_with_fake_server(tmp_path, monkeypatch):
     monkeypatch.setattr(healthcheck, "is_online", lambda: True)
     monkeypatch.setattr(netspeed, "connection_info", lambda: {"type": "Ethernet", "link": "1 Gbps"})
     monkeypatch.setattr(netspeed, "meta", lambda: {"ip": "203.0.113.5", "isp": "Example ISP", "server": "Cloudflare BNE"})
+    monkeypatch.setattr(netspeed, "ping_text", lambda run, n=10: "")                 # ICMP blocked -> web fallback
     monkeypatch.setattr(netspeed, "http_latency", lambda **k: [10, 12, 11])
     monkeypatch.setattr(netspeed, "transfer", lambda d, **k: {"mbps": 250.0 if d == "down" else 30.0, "bytes": 5_000_000})
     a = _speed_api(tmp_path)
@@ -247,6 +248,7 @@ def test_speed_test_server_down_is_an_error_not_a_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(healthcheck, "is_online", lambda: True)
     monkeypatch.setattr(netspeed, "connection_info", lambda: {"type": None})
     monkeypatch.setattr(netspeed, "meta", lambda: {})
+    monkeypatch.setattr(netspeed, "ping_text", lambda run, n=10: "")
     monkeypatch.setattr(netspeed, "http_latency", lambda **k: [])
     monkeypatch.setattr(netspeed, "transfer", lambda d, **k: {"mbps": None, "bytes": 0})
     a = _speed_api(tmp_path)
@@ -336,3 +338,18 @@ def test_older_settings_load_with_new_keys(tmp_path, old):
     assert o["move_hold"] == "Ctrl+Alt"
     if "x" in old.get("overlay", {}):
         assert (o["x"], o["y"]) == (10, 20)                        # saved position kept
+
+
+def test_speed_test_uses_windows_ping_when_it_answers(tmp_path, monkeypatch):
+    from riglab.core import healthcheck
+    monkeypatch.setattr(healthcheck, "is_online", lambda: True)
+    monkeypatch.setattr(netspeed, "connection_info", lambda: {"type": None})
+    monkeypatch.setattr(netspeed, "meta", lambda: {})
+    out = "\n".join(f"Reply from 1.1.1.1: bytes=32 time={t}ms TTL=57" for t in (10, 12, 10, 12, 10, 12, 10, 12, 10))
+    monkeypatch.setattr(netspeed, "ping_text", lambda run, n=10: out)               # 9 of 10 answered
+    monkeypatch.setattr(netspeed, "http_latency", lambda **k: pytest.fail("not needed when ping works"))
+    monkeypatch.setattr(netspeed, "transfer", lambda d, **k: {"mbps": 100.0, "bytes": 1})
+    a = _speed_api(tmp_path)
+    a.netspeed_start()
+    r = _wait(a)["result"]
+    assert r["ping"] == 10 and r["jitter"] == 2.0 and r["loss"] == 10.0
