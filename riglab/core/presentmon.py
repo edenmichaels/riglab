@@ -80,6 +80,15 @@ def parse_line(parts: list[str], idx: tuple[int, int | None, int]) -> tuple[str,
     return app, pid, ms
 
 
+def pick_reading(fg_pid, readings: dict) -> tuple | None:
+    """(pid, reading): the window in front if it's drawing frames, else the busiest app drawing at least 10 FPS."""
+    r = readings.get(fg_pid) if fg_pid is not None else None
+    if r:
+        return fg_pid, r
+    busy = [(p, x) for p, x in readings.items() if x and (x.get("fps") or 0) >= 10]
+    return max(busy, key=lambda px: px[1]["fps"]) if busy else None
+
+
 def live_reading(samples, now: float) -> dict | None:
     """FPS (last 1 s), 1% low (last 10 s) and average frame time from [(monotonic time, ms), ...].
     None when the program hasn't presented a frame for 1.5 s (it isn't rendering)."""
@@ -173,15 +182,20 @@ class Capture:
             self.recording = max(0, self.recording - 1)
 
     def reading_for(self, pid: int | None, now: float | None = None) -> dict:
-        """Overlay reading for the program in front: {"state": "ok", fps, low1, frametime, app} or {"state": "no_game"}."""
+        """Overlay reading for the program in front: {"state": "ok", fps, low1, frametime, app} or {"state": "no_game"}.
+        Many games draw from a different process than the one that owns their window (launchers, anti-cheat
+        wrappers, Store games), so when the window in front isn't drawing, use the busiest app that is."""
         now = time.monotonic() if now is None else now
         with self._lock:
-            q = list(self.live.get(pid, ())) if pid is not None else []
-            name = self.names.get(pid)
-        r = live_reading(q, now) if q else None
-        if not r:
+            pids = list(self.live)
+            qs = {p: list(self.live[p]) for p in pids}
+            names = dict(self.names)
+        readings = {p: live_reading(q, now) if q else None for p, q in qs.items()}
+        best = pick_reading(pid, readings)
+        if best is None:
             return {"state": "no_game"}
-        return {"state": "ok", "app": name, **r}
+        p, r = best
+        return {"state": "ok", "app": names.get(p), "guess": p != pid, **r}
 
     def main_app(self) -> str | None:
         with self._lock:

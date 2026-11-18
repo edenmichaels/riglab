@@ -13,7 +13,9 @@ function h(sel, attrs, ...kids) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
     if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+    else if (k === "style" && typeof v === "object") {
+      for (const [sk, sv] of Object.entries(v)) { if (sv == null) continue; if (sk.startsWith("--")) el.style.setProperty(sk, sv); else el.style[sk] = sv; }
+    }
     else if (k === "html") el.innerHTML = v;
     else if (k === "class") el.className += " " + v;
     else if (k in el && k !== "list") { try { el[k] = v; } catch { el.setAttribute(k, v); } }
@@ -68,7 +70,15 @@ const ICON_PATHS = {
   overlay: "M3 5h18v14H3zM6 8h5v3H6z",
   trash: "M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6",
   rocket: "M5 15c-1.5 1.3-2 5-2 5s3.7-.5 5-2M12 15l-3-3M9 12c1-5 5-9 11-9 0 6-4 10-9 11M15 9h.01",
-  undo: "M3 7v6h6M3 13a9 9 0 1 0 3-7.7L3 8",
+  undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11",   // Lucide "undo-2" (ISC licence)
+  star: "M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z",   // Lucide "star" (ISC)
+  back: "M19 12H5M12 19l-7-7 7-7",                                                  // Lucide "arrow-left" (ISC)
+  help: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01",   // Lucide "circle-help" (ISC)
+  minimise: "M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0",
+  maximise: "M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4",
+  grid: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
+  palette: "M12 3a9 9 0 1 0 0 18c1.1 0 1.6-.8 1.6-1.6 0-.9-.6-1.3-.6-2.1 0-.9.7-1.6 1.6-1.6H17a4 4 0 0 0 4-4C21 6.6 17 3 12 3zM7.5 12a1.2 1.2 0 1 0 0-.01M10 7.5a1.2 1.2 0 1 0 0-.01M14.5 7.5a1.2 1.2 0 1 0 0-.01",
+  speed: "M12 14l4-6M3.5 17a9 9 0 1 1 17 0",
   bench: "M4 20V10M10 20V4M16 20v-7M22 20H2",
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   link: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7",
@@ -109,6 +119,7 @@ function toast(msg, bad = false) {
   const t = h("div.toast" + (bad ? ".bad" : ""), msg);
   box.append(t);
   setTimeout(() => t.remove(), 4500);
+  if (typeof UndoBtn !== "undefined") setTimeout(() => UndoBtn.refresh(), 150);     // something probably changed
 }
 
 // ------------------------------------------------------------------ canvas helpers
@@ -180,25 +191,6 @@ function drawChart(c, series, { xLabel = "", yLabel = "", rLabel = "", yMin = nu
   return { X, Y, pad, w, h: hh };
 }
 
-/* Ring gauge (SVG), 270° sweep */
-function gauge(value, max, color, unit) {
-  const R = 70, C = 2 * Math.PI * R, sweep = 0.75;
-  const pct = value == null ? 0 : Math.max(0, Math.min(1, value / max));
-  const wrap = h("div.gauge");
-  wrap.innerHTML = `<svg viewBox="0 0 170 170"><circle cx="85" cy="85" r="${R}" fill="none" stroke="${css("--line")}" stroke-width="12"
-    stroke-dasharray="${C * sweep} ${C}" stroke-linecap="round"/><circle class="arc" cx="85" cy="85" r="${R}" fill="none" stroke="${color}"
-    stroke-width="12" stroke-dasharray="${C * sweep * pct} ${C}" stroke-linecap="round" style="transition:stroke-dasharray .6s, stroke .6s;filter:drop-shadow(0 0 6px ${color}88)"/></svg>
-    <div class="g-val"><div class="g-num">${value == null ? "—" : Math.round(value)}</div><div class="g-unit">${unit}</div></div>`;
-  wrap.update = (v, col) => {
-    const p = v == null ? 0 : Math.max(0, Math.min(1, v / max));
-    const arc = wrap.querySelector(".arc");
-    arc.setAttribute("stroke-dasharray", `${C * sweep * p} ${C}`);
-    arc.setAttribute("stroke", col); arc.style.filter = `drop-shadow(0 0 6px ${col}88)`;
-    wrap.querySelector(".g-num").textContent = v == null ? "—" : Math.round(v);
-  };
-  return wrap;
-}
-
 function switchEl(checked, onchange, disabled = false) {
   const inp = h("input", { type: "checkbox", checked, disabled, onchange: (e) => onchange(e.target.checked, e.target) });
   return h("label.switch", inp, h("span"));
@@ -220,4 +212,48 @@ function banner(kind, iconName, html, action) {
 
 function cardHead(title, ic, ...right) {
   return h("div.card-head", ic ? h("div.icon-badge", icon(ic)) : null, h("h3", title), h("div.spacer"), ...right);
+}
+
+/* ------------------------------------------------------------------ never show "null", "undefined" or "NaN"
+   3.11 showed the word "null" at the top left: the top bar passed `null` (meaning "no preview badge") to a DOM
+   method, and DOM methods turn null into the text "null". Two guards so that can't happen anywhere:
+   1. append/prepend/replaceChildren/before/after/replaceWith skip null, undefined and false.
+   2. a watcher replaces any text that is exactly null / undefined / NaN (or a number that came out as NaN) with
+      a dash, and reports it in the console so it can be fixed properly (the click-through test fails on it). */
+(function guardDom() {
+  const clean = (args) => args.flat(Infinity).filter(a => a !== null && a !== undefined && a !== false);
+  for (const proto of [Element.prototype, DocumentFragment.prototype, Document.prototype]) {
+    for (const m of ["append", "prepend", "replaceChildren", "before", "after", "replaceWith"]) {
+      const orig = proto[m];
+      if (typeof orig !== "function" || orig.__guarded) continue;
+      const wrapped = function (...a) { return orig.apply(this, clean(a)); };
+      wrapped.__guarded = true;
+      proto[m] = wrapped;
+    }
+  }
+  const BAD = /(^|[^\w.-])(null|undefined|NaN)(?![\w-])/g;
+  const fix = (node) => {
+    const t = node.nodeValue;
+    if (!t || !/null|undefined|NaN/.test(t)) return;
+    const p = node.parentElement;
+    if (!p || p.closest("script,style,textarea,input,code,pre,.allow-raw")) return;
+    const nt = t.replace(BAD, (m, a) => a + "—");
+    if (nt !== t) { console.warn("RigLab fixed missing text:", JSON.stringify(t), "in", p.className || p.tagName); node.nodeValue = nt; }
+  };
+  const walk = (root) => {
+    if (root.nodeType === 3) return fix(root);
+    const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = tw.nextNode(); n; n = tw.nextNode()) fix(n);
+  };
+  const start = () => {
+    walk(document.body);
+    new MutationObserver((ms) => { for (const m of ms) { if (m.type === "characterData") fix(m.target); else m.addedNodes.forEach(walk); } })
+      .observe(document.body, { childList: true, subtree: true, characterData: true });
+  };
+  if (document.body) start(); else document.addEventListener("DOMContentLoaded", start);
+})();
+/* text for a value that might be missing: safe(v) -> "—" for null/undefined/NaN/"" */
+function safe(v, fallback = "—") {
+  if (v === null || v === undefined || v === "" || (typeof v === "number" && !Number.isFinite(v))) return fallback;
+  return String(v);
 }

@@ -145,8 +145,9 @@ App.pages.lighting = {
       h("button.btn", { title: "Copy diagnostics to paste when asking for help", onclick: () => this.copyReport() }, icon("info"), "Copy report"),
       h("button.btn", { onclick: async () => { toast("Rescanning devices…"); await App.api.light_rescan(); this.load(); } }, icon("refresh"), "Rescan"),
       h("span.act", h("button.btn", { onclick: () => this.setState({ effect: "Off" }, true) }, icon("power"), "All off"), infoBtn("light.off"))));
+    this.bootLine = h("div");
     this.body = h("div", h("div.empty", h("div.spinner"), h("div.mt", "Starting the lighting service…")));
-    el.append(this.body);
+    el.append(this.bootLine, this.body);
     App.api.light_reset();          // every LED starts clean each time this page opens
     this.load();
     clearInterval(this.poll);
@@ -166,13 +167,15 @@ App.pages.lighting = {
     if (!document.body.contains(this.body)) return clearInterval(this.poll);
     const st = await App.api.light_state();
     const was = this.st?.status, n = this.st?.devices.length;
-    this.st = Object.assign(this.st || {}, { status: st.status, msg: st.msg, error: st.error, stats: st.stats });
+    this.st = Object.assign(this.st || {}, { status: st.status, msg: st.msg, error: st.error, stats: st.stats, boot: st.boot });
     this.drawStatus();
     if (st.status !== was || st.devices.length !== n) { this.st = st; this.load(); }
     else if (this.notRunMsg) this.notRunMsg.textContent = st.msg || st.error || "Starting…";
   },
   drawStatus() {
     const st = this.st, s = st.stats || {};
+    const b = st.boot;           // what the automatic check after a Windows restart found
+    if (this.bootLine) this.bootLine.replaceChildren(b ? h("div.row.small", { style: { gap: "8px", margin: "0 0 12px" } }, dot(b.state), h("span", b.say)) : "");
     const on = st.status === "running";
     this.statusPill.className = "pill " + (on ? "good" : st.status === "paused" ? "" : "bad");
     this.statusPill.textContent = on ? `● Streaming ${s.leds || 0} LEDs · ${Math.round(s.fps || 0)} fps` : st.status === "paused" ? "Paused" : "○ " + (st.status || "stopped");

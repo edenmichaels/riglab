@@ -157,37 +157,79 @@ function infoTip(text, title) {
 }
 
 // ------------------------------------------------------------------ keys / legends (compact: one link that expands)
+/* 3.12: keys open from a small "?" button instead of always taking up space. */
+function keyButton(label, body) {
+  const pop = h("div.key-pop.hide", { role: "dialog", "aria-label": label }, h("div.small.muted", { style: { marginBottom: "6px", fontWeight: 600 } }, label), body);
+  const btn = h("button.key-q", { type: "button", title: label, "aria-label": label, "aria-expanded": "false",
+    onclick: (e) => {
+      e.stopPropagation();
+      const open = pop.classList.toggle("hide") === false;
+      btn.setAttribute("aria-expanded", String(open));
+      if (open) setTimeout(() => document.addEventListener("click", function off(ev) {
+        if (!pop.contains(ev.target)) { pop.classList.add("hide"); btn.setAttribute("aria-expanded", "false"); document.removeEventListener("click", off); }
+      }), 0);
+    } }, icon("help"));
+  return h("span.key", btn, pop);
+}
 function colourKey(opts = {}) {
   const L = XD.legend || {};
   const rows = [h("div.key-row", dot("good"), L.good), h("div.key-row", dot("warn"), L.warn), h("div.key-row", dot("bad"), L.bad),
     opts.grey === false ? null : h("div.key-row", dot("none"), L.none)];
   const risk = opts.risk ? [h("div.key-sep"), ...["None", "Low", "Medium", "High"].map(r => h("div.key-row", riskPill(r), h("span", XD.risks[r])))] : [];
   const extra = (opts.extra || []).map(([ic, txt]) => h("div.key-row", typeof ic === "string" ? h("span.key-ic", icon(ic)) : ic, txt));
-  return h("details.key", h("summary", opts.label || (opts.risk ? "What do the colours and risk levels mean?" : "What do the colours mean?")),
+  return keyButton(opts.label || (opts.risk ? "What do the colours and risk levels mean?" : "What do the colours mean?"),
     h("div.key-body", ...rows, ...risk, ...(extra.length ? [h("div.key-sep"), ...extra] : [])));
 }
 function riskKey() {
-  return h("details.key", h("summary", "What do the risk levels mean?"),
-    h("div.key-body", ...["None", "Low", "Medium", "High"].map(r => h("div.key-row", riskPill(r), h("span", XD.risks[r])))));
+  return keyButton("What do the risk levels mean?", h("div.key-body", ...["None", "Low", "Medium", "High"].map(r => h("div.key-row", riskPill(r), h("span", XD.risks[r])))));
 }
 
 // ------------------------------------------------------------------ health dial (shared by Home and PC Health)
 const Health = {
-  last: null, history: [], running: false, loaded: false, subs: new Set(),
+  last: null, history: [], running: false, loaded: false, subs: new Set(), job: null, timer: null,
   async load(force) {
     if (this.loaded && !force) return this.emit();
     try { const r = await App.api.health_last(); this.last = r.last; this.history = r.history || []; } catch { /* keep */ }
+    try { const st = await App.api.health_status(); if (st && st.running) { this.job = st; this.running = st.kind !== "repair"; this.poll(); } } catch { /* none */ }
     this.loaded = true; this.emit();
   },
-  async run() {
-    if (this.running) return;
-    this.running = true; this.emit();
-    try {
-      const r = await App.api.health_quick();
-      if (r && !r.busy) { this.last = r; if (r.score != null) this.history.push({ time: r.time, score: r.score }); }
-    } catch (e) { toast("The check didn't finish: " + e, true); }
-    this.running = false; this.emit();
+  /* kind: "quick" or "full". Runs in the background; progress comes from health_status() every second. */
+  async run(kind = "quick") {
+    if (this.job && this.job.running) return;
+    let st;
+    try { st = await App.api.health_start(kind); } catch (e) { toast("The check couldn't start: " + e, true); return; }
+    this.job = st; this.running = true; this.emit(); this.poll();
   },
+  async fix(id) {
+    const r = await App.api.health_fix(id);
+    toast(r.msg, !r.ok);
+    if (r.ok && r.running) { this.job = r; this.emit(); this.poll(); }
+    return r;
+  },
+  poll() {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(async () => {
+      let st;
+      try { st = await App.api.health_status(); } catch { st = null; }
+      if (!st) return this.poll();
+      this.job = st;
+      if (!st.running) {
+        if (st.kind !== "repair" && st.result) {
+          this.prev = this.last && this.last.score != null ? this.last.score : null;
+          this.finishedAt = Date.now();
+          this.last = st.result;
+          if (st.result.score != null) this.history.push({ time: st.result.time, score: st.result.score, kind: st.result.kind });
+          toast(st.result.summary);
+        } else if (st.cancelled) toast("Check cancelled. Nothing was saved.");
+        else if (st.kind === "repair") toast((st.items[0] || {}).say || "Repair finished");
+        this.running = false; this.emit();
+        if (st.kind === "repair") this.job = null;
+        return;
+      }
+      this.emit(); this.poll();
+    }, 1000);
+  },
+  async cancel() { try { await App.api.health_cancel(); } catch { /* ignore */ } },
   emit() { for (const f of [...this.subs]) f(); },
 };
 
@@ -199,37 +241,50 @@ function ago(t) {
   return `${Math.round(s / 86400)} days ago`;
 }
 
-/* healthDial({ link: true }) - a big circular 0-100 dial. Colour follows the traffic-light rules.
-   link: clicking the dial opens PC Health. Both pages use this one component, so they always match. */
+/* healthDial({ link, both }) - the 0-100 dial on Home and PC Health. It's the shared Gauge (gauge.js), so it
+   looks and moves exactly like every other dial: scanning glow while a check runs, then it fills from the old
+   score (0 the first time), counts up, blends red -> yellow -> green and settles with a breathing glow. */
 function healthDial(opts = {}) {
   const box = h("div.hdial-wrap");
-  let mounted = false;
+  const g = Gauge.create({ kind: "ring", stops: STOPS.health, label: "PC health", unit: "%", size: opts.size || 220 });
+  const ring = g.el;
+  if (opts.link) {
+    ring.classList.add("link");
+    Object.assign(ring, { tabIndex: 0, title: "Open PC Health", onclick: () => go("dashboard"), onkeydown: (e) => { if (e.key === "Enter") go("dashboard"); } });
+    ring.setAttribute("role", "button");
+  }
+  const none = h("div.hdial-none", "Not checked yet");
+  const say = h("div.hdial-say"), buttons = h("div");
+  box.append(ring, say, buttons);
+  let mounted = false, was = null;
   const draw = () => {
-    if (mounted && !box.isConnected) { Health.subs.delete(draw); return; }
+    if (mounted && !box.isConnected) { Health.subs.delete(draw); g.destroy(); return; }
     if (box.isConnected) mounted = true;
-    const r = Health.last, running = Health.running;
-    const v = r && r.score != null ? r.score : null, st = running ? "none" : (r ? r.state : "none");
-    const R = 88, C = 2 * Math.PI * R, pct = v == null || running ? 0 : v / 100;
-    const col = { good: "var(--good)", warn: "var(--warn)", bad: "var(--bad)", none: "var(--faint)" }[st];
-    const ring = h("div.hdial" + (opts.link ? ".link" : ""), {
-      role: opts.link ? "button" : null, tabIndex: opts.link ? 0 : null, title: opts.link ? "Open PC Health" : null,
-      onclick: opts.link ? () => go("dashboard") : null, onkeydown: opts.link ? (e) => { if (e.key === "Enter") go("dashboard"); } : null });
-    ring.innerHTML = `<svg viewBox="0 0 220 220" aria-hidden="true"><circle cx="110" cy="110" r="${R}" fill="none" stroke="var(--line)" stroke-width="16"/>
-      <circle cx="110" cy="110" r="${R}" fill="none" stroke="${col}" stroke-width="16" stroke-linecap="round" transform="rotate(-90 110 110)"
-        stroke-dasharray="${C * pct} ${C}" style="transition:stroke-dasharray .8s, stroke .6s;filter:drop-shadow(0 0 8px ${col})"/></svg>`;
-    const mid = h("div.hdial-mid");
-    if (running) mid.append(h("div.spinner"), h("div.small.muted", { style: { marginTop: "10px" } }, "Checking…"));
-    else if (v == null) mid.append(h("div.hdial-none", "Not checked yet"));
-    else mid.append(h("div.hdial-num", { style: { color: col } }, v, h("small", "%")), h("div.small.muted", "PC health"));
-    ring.append(mid);
+    const r = Health.last, running = Health.running, job = Health.job || {};
+    const v = r && r.score != null ? r.score : null;
+    if (running) {
+      g.scan(true, job.progress || 0);
+      g.setSub(job.kind === "full" ? "Full check" : "Quick check");
+      g.setCenter(null);
+    } else if (v == null) {
+      g.scan(false); g.set(null); g.setSub(""); g.setCenter(none);
+    } else {
+      g.setCenter(null); g.setSub("PC health");
+      if (was === "running") { g.scan(false); g.set(v, { from: Health.prev ?? 0 }); }     // new result: old score -> new score
+      else if (g.value == null && !g.busy) g.set(v, { from: 0 });                         // first time on screen: fill up
+      else if (g.value !== v && !g.busy) g.set(v);
+    }
+    was = running ? "running" : (v == null ? "none" : "done");
     ring.setAttribute("aria-label", running ? "Checking your PC" : v == null ? "PC health: not checked yet" : `PC health ${v} out of 100`);
-    const line = running ? "Checking temperatures, memory, space, fans, drives and crashes. This takes about 20 seconds."
-      : v == null ? "Run a quick check to get a health score for your PC." : r.summary;
-    box.replaceChildren(ring,
-      h("div.hdial-say", line),
-      running ? null : h("div.row", { style: { gap: "10px", justifyContent: "center", flexWrap: "wrap" } },
-        v == null ? actionBtn("health.quick", () => Health.run(), { cls: "primary", icon: "heart", always: true })
-          : [h("span.small.muted", "Checked " + ago(r.time) + "."), h("button.btn.sm.ghost", { onclick: () => Health.run() }, icon("refresh"), "Check again")]));
+    say.textContent = running ? "Checking your PC. You can keep using it while this runs." : v == null ? "Run a quick check to get a health score for your PC." : (r.summary || "");
+    buttons.replaceChildren(running ? h("div.stack", { style: { gap: "8px", alignItems: "center" } },
+        h("div.small", (job.step || "Starting…") + (job.count ? ` (step ${job.index} of ${job.count})` : "")),
+        h("div.small.muted", job.eta_text || ""),
+        h("button.btn.sm", { onclick: () => Health.cancel() }, icon("stop"), "Cancel"))
+      : h("div.row", { style: { gap: "10px", justifyContent: "center", flexWrap: "wrap" } },
+        v != null ? h("span.small.muted", (r.kind === "full" ? "Full check " : "Quick check ") + ago(r.time) + ".") : null,
+        actionBtn("health.quick", () => Health.run("quick"), { cls: v == null ? "primary" : "sm", icon: "heart", always: true, label: v == null ? "Run a quick check" : "Quick check" }),
+        opts.both ? actionBtn("health.full", () => Health.run("full"), { cls: "sm", icon: "search", always: true }) : null));
   };
   Health.subs.add(draw);
   draw();
@@ -238,19 +293,20 @@ function healthDial(opts = {}) {
 }
 
 // ------------------------------------------------------------------ presets (Home)
-function presetCards(onChanged) {
+function presetCards(onChanged, filter = {}) {
   const box = h("div.preset-row", h("div.small.muted", "Loading…"));
   const draw = async () => {
     let st;
     try { st = await App.api.preset_state(); } catch { box.replaceChildren(h("div.small.muted", "Presets aren't available right now.")); return; }
-    box.replaceChildren(...st.cards.map(c => {
+    const cards = st.cards.filter(c => (!filter.only || filter.only.includes(c.id)) && (!filter.except || !filter.except.includes(c.id)));
+    box.replaceChildren(...cards.map(c => {
       const on = st.active === c.id;
       return h("button.preset" + (on ? ".on" : ""), { "aria-pressed": on, onclick: () => presetPanel(c.id, () => { draw(); if (onChanged) onChanged(); }) },
         h("div.icon-badge", icon(c.icon)),
         h("div.preset-name", c.name, on ? h("span.pill.good", "In use") : null),
         h("div.small.muted", c.desc));
     }));
-    if (!st.active) box.append(h("div.small.muted.preset-note", "None of these match your settings right now - you're using your own mix. Pick one to switch."));
+    if (!st.active && !filter.except) box.append(h("div.small.muted.preset-note", "None of these match your settings right now - you're using your own mix. Pick one to switch."));
   };
   draw();
   return box;
@@ -284,4 +340,18 @@ async function presetPanel(pid, done) {
   if (r == null) return;
   toast(r.msg, !r.ok);
   if (done) done(r);
+}
+
+// ------------------------------------------------------------------ Simple view: a door into Advanced view
+/* A card for a feature that's only shown in Advanced view: switches view and goes straight there. */
+function openAdvanced(page, opts = {}) {
+  if (opts.tab && App.pages[page]) App.pages[page].tab = opts.tab;
+  setView("advanced", false).then(() => go(page, opts.focus ? { focus: opts.focus } : {}));
+}
+function advLink(name, page, opts = {}) {
+  return h("div.adv-link", { role: "button", tabIndex: 0, "data-adv": page + (opts.focus ? "#" + opts.focus : ""),
+    onclick: () => openAdvanced(page, opts), onkeydown: (e) => { if (e.key === "Enter") openAdvanced(page, opts); } },
+    h("span.icon-badge", icon(opts.icon || "sliders")),
+    h("div", { style: { minWidth: 0 } }, h("div", h("b", name), " - this is an advanced feature."), opts.desc ? h("div.small.muted", opts.desc) : null),
+    h("span.adv-go", "Open in Advanced view →"));
 }

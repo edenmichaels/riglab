@@ -16,7 +16,7 @@ from dataclasses import asdict
 
 from datetime import datetime, timezone
 
-from .core import bench, crashes, diagnostics, explain, health, lhm_setup, oc, presets, report, sysinfo, tweaks
+from .core import bench, crashes, diagnostics, explain, health, healthcheck, lhm_setup, netspeed, oc, pcinfo, presets, report, schedule, storage, sysinfo, tweaks
 from .core.changes import ChangeLog
 from .core.config import APP_VERSION, app_dir
 from .core.fans import PRESETS
@@ -53,7 +53,10 @@ class Api:
         self._crash_cache = None
         self._changes = ChangeLog()
         self._health = health.HealthStore()
-        self._checking = threading.Lock()
+        self._job = None
+        self._big = None              # largest-files scan
+        self._net = None              # internet speed test job
+        self._net_hist = netspeed.History()
         self.startup_notes_list = []
 
     # ------------------------------------------------------------------ general
@@ -63,11 +66,19 @@ class Api:
                 "view": self._cfg.data.get("ui", {}).get("view", "simple"), "lights": explain.lights(self._cfg.data.get("alerts"))}
 
     def ui_set(self, values):
-        """Appearance + start page (saved immediately, no Save button needed)."""
-        self._cfg.data.setdefault("ui", {}).update({k: v for k, v in values.items() if k in ("theme", "accent", "start_page")
-                                                     or (k == "view" and v in ("simple", "advanced"))})
+        """Appearance + start page (saved immediately, no Save button needed). Theme, colour, text size and
+        animation changes go in Change history (clicking through several themes = one entry, one Undo)."""
+        ui = self._cfg.data.setdefault("ui", {})
+        new = ui_values(values)
+        if (values or {}).get("_undo") and "pins" in values and values["pins"] is None:
+            new["pins"] = None                           # undo back to "never chosen" (= the default pins)
+        watched = {k: v for k, v in new.items() if k in APPEARANCE_KEYS and ui.get(k) != v}
+        before = {k: ui.get(k) for k in watched}
+        ui.update(new)
         self._cfg.save()
-        return self._cfg.data["ui"]
+        if watched and not (values or {}).get("_undo"):
+            self._log("appearance", "Look changed: " + ", ".join(APPEARANCE_KEYS[k] for k in watched), before=before, after=watched, merge="appearance")
+        return ui
 
     def snapshot(self):
         h = self._hub
@@ -296,22 +307,85 @@ class Api:
         self._gpurun.stop(score)
         return True
 
-    def overlay_config(self):
-        """What the overlay page should draw (re-read every tick, so Settings changes show up live)."""
-        o = self._cfg["overlay"]
-        return {"mode": overlay.norm_mode(o.get("mode")), "show_fps": bool(o.get("show_fps")), "size": o.get("size", "m"),
-                "opacity": float(o.get("opacity", 0.85)), "fps_color": o.get("fps_color", "auto"), "edit": self._app._ov_edit}
+    def overlay_data(self):
+        """Just the readings the overlay shows (much lighter than snapshot)."""
+        h = self._hub
+        val = lambda s: _r(s.value) if s is not None and s.value is not None else None  # noqa: E731
+        out = {"cpu_temp": val(h.cpu_temp()), "gpu_temp": val(h.gpu_temp()), "cpu_load": val(h.cpu_load()),
+               "gpu_load": val(h.gpu_load()), "ram": val(h.ram_load()), "cpu_clock": _r(h.cpu_clock(), 0)}
+        gc = next((s for s in h.latest.sensors.values() if s.kind == "Clock" and (s.hw_type or "").startswith("Gpu")
+                   and "core" in s.name.lower() and s.value is not None), None)
+        out["gpu_clock"] = _r(gc.value, 0) if gc else None
+        out["fps"] = self.overlay_fps()
+        return out
 
     def overlay_edit(self, on):
         return self._app.overlay_edit(bool(on))
+
+    def overlay_status(self):
+        return self._app.overlay_status()
+
+    def overlay_lock(self, locked):
+        return self._app.overlay_lock(bool(locked))
+
+    def overlay_minimise(self, on):
+        return self._app.overlay_minimise(bool(on))
+
+    def overlay_set(self, values):
+        """Overlay settings panel: applies straight away (no Save button). Position is only changed by dragging."""
+        o = self._cfg["overlay"]
+        new = dict(o)
+        for k, v in (values or {}).items():
+            if k in OVERLAY_KEYS:
+                new[k] = v
+        if values.get("preset") in overlay.PRESETS:
+            new = overlay.apply_preset(new, values["preset"])
+        new = overlay.migrate(new)
+        hotkey_changed = new.get("hotkey") != o.get("hotkey")
+        if new.get("hotkey") and not overlay.parse_hotkey(new["hotkey"]):
+            new["hotkey"] = o.get("hotkey", "")
+        before = {k: o.get(k) for k in OVERLAY_KEYS}
+        o.clear()
+        o.update(new)
+        self._cfg.save()
+        self._app._ov_hold_vks = overlay.parse_hold(o.get("move_hold", "")) or []
+        self._app.apply_overlay()
+        ok = True
+        if hotkey_changed:
+            ok = bool(self._app.overlay_hotkey()) or not o.get("hotkey")
+            self._app._ov_hotkey_ok = ok
+        after = {k: o.get(k) for k in before}
+        if after != before and not values.get("_undo"):
+            self._log("overlay", "Overlay settings changed", before=before, after=after, merge="overlay")
+        return {"overlay": o, "hotkey_ok": ok}
 
     def overlay_corner(self, corner):
         self._app.overlay_corner(corner)
         return True
 
-    def overlay_fit(self, w, h):
-        self._app.overlay_fit(w, h)
-        return True
+    def overlay_preview(self, values=None, background="dark"):
+        """The overlay settings' live preview: the real overlay picture (same drawing code as the in-game
+        window) on a pretend dark or light game screen, before you apply anything. Returns a PNG data URL."""
+        import base64
+        import io
+
+        from PIL import Image
+        from .core import ovrender
+        o = overlay.migrate(dict(self._cfg["overlay"], **{k: v for k, v in (values or {}).items() if k in OVERLAY_KEYS}))
+        if (values or {}).get("preset") in overlay.PRESETS:
+            o = overlay.apply_preset(o, values["preset"])
+        ui = self._cfg.data.get("ui", {})
+        sample = {"cpu_temp": 64, "gpu_temp": 71, "cpu_load": 38, "gpu_load": 96, "ram": 47, "cpu_clock": 4950, "gpu_clock": 2610,
+                  "fps": {"state": "ok", "fps": 144, "low1": 102, "frametime": 6.9}}
+        fr = ovrender.render(o, sample, theme=ui.get("theme", "dark"), accent=ui.get("accent", "theme"),
+                             history=[6.9, 7.2, 6.8, 7.5, 6.6, 9.8, 7.0, 6.9, 7.1, 6.8] * 3)
+        bg = (238, 242, 247) if background == "light" else (23, 30, 41)
+        w, h = fr.size
+        canvas = Image.new("RGB", (w + 24, h + 24), bg)
+        canvas.paste(fr.image, (12, 12), fr.image)
+        buf = io.BytesIO()
+        canvas.save(buf, "PNG")
+        return {"png": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), "w": w, "h": h}
 
     def overlay_fps(self):
         """FPS row for the overlay: {"state": "off" | "unavailable" | "no_game"} or {"state": "ok", fps, low1, frametime, app}."""
@@ -537,7 +611,9 @@ class Api:
                 "effects": [x for x in EFFECTS if x != "Off"] + ledmap.SPATIAL_EFFECTS + list(fx.EFFECTS) + ["Off"],
                 "palettes": list(fx.PALETTES),
                 "fan_types": CORSAIR_LED_COUNTS, "orders": list(ORDERS), "exe": h.exe(), "port": PORT,
-                "setup": [{"key": d["key"], "zone": z["name"]} for d in devs for z in d["zones"] if z.get("unconfirmed")]}
+                "setup": [{"key": d["key"], "zone": z["name"]} for d in devs for z in d["zones"] if z.get("unconfirmed")],
+                "boot": boot_words(getattr(self._app, "lightwatch", None)),
+                "last_effect": e.L.get("last_effect") or "Rainbow sweep"}
 
     def light_reset(self):
         """Called every time the Lighting page opens."""
@@ -573,11 +649,22 @@ class Api:
         return self.light_state()
 
     def light_set(self, state):
+        before = dict(self._light.L["state"])
+        if (state or {}).get("effect") == "Off" and before.get("effect") not in (None, "Off"):
+            self._light.L["last_effect"] = before.get("effect")     # so "Lights on" on Home brings it back
         self._light.set_state(**state)
+        after = dict(self._light.L["state"])
+        if after != before:
+            self._log("lighting", f"Lights: {after.get('effect', 'changed')}", before={"state": before}, after={"state": after}, merge="lighting")
         return True
 
     def light_device(self, key, settings):
+        ds = self._light.dev_settings(key)
+        before = {k: ds.get(k) for k in settings}
         self._light.set_device(key, **settings)
+        if before != {k: ds.get(k) for k in settings}:
+            self._log("light_device", f"Lights: {key} settings", before={"key": key, "settings": before}, after={"key": key, "settings": settings},
+                      merge="light_device:" + key)
         return self.light_state()
 
     def light_zone(self, key, zone, size=None, per=None, empty=None):
@@ -606,14 +693,22 @@ class Api:
         threading.Thread(target=clear, daemon=True).start()
         return True
 
+    def startup_log(self):
+        """Advanced view -> RigLab setup: what RigLab did at start-up and in the background (lighting scans,
+        wake from sleep, devices plugged in), newest first."""
+        ev = getattr(self._app, "events", None)
+        if ev is None:
+            return {"items": [], "text": "Nothing logged yet."}
+        return {"items": ev.items(200), "text": ev.text(200)}
+
     def light_rescan(self):
-        e = self._light
-        if not e.client:
-            return self.light_connect()
+        """Rescan button: a real fresh hardware scan (restarts RigLab's lighting service), then reapply the effect."""
+        w = getattr(self._app, "lightwatch", None)
         try:
-            e.client.rescan_devices() if hasattr(e.client, "rescan_devices") else None
-            time.sleep(2)
-            e.discover()
+            if w is not None:
+                w.check("manual")
+            else:
+                self._light.full_rescan()
         except Exception as ex:  # noqa: BLE001
             return {"error": str(ex)}
         return self.light_state()
@@ -666,7 +761,7 @@ class Api:
         return "\n".join(lines)
 
     def rgb_off(self):           # used by the dashboard button
-        self._light.set_state(effect="Off")
+        self.light_set({"effect": "Off"})
         return "ok"
 
     # ------------------------------------------------------------------ fans
@@ -763,8 +858,16 @@ class Api:
             except Exception as e:  # noqa: BLE001
                 gpu = {"error": str(e)}
         self._startup = tweaks.startup_items()
-        startup = [{"i": i, "name": s.name, "cmd": s.command, "where": s.location, "on": s.enabled}
-                   for i, s in enumerate(self._startup)]
+        startup = []
+        for i, it in enumerate(self._startup):
+            size = None
+            try:
+                p = storage.exe_path(it.command)
+                size = os.path.getsize(os.path.expandvars(p)) if p else None
+            except OSError:
+                pass
+            impact, why = storage.startup_impact(it.name, it.command, size)
+            startup.append({"i": i, "name": it.name, "cmd": it.command, "where": it.location, "on": it.enabled, "impact": impact, "why": why})
         return {"tweaks": out, "plans": plans, "gpu": gpu, "startup": startup, "admin": tweaks.is_admin()}
 
     def tweak_set(self, tid, on, source="you"):
@@ -955,44 +1058,341 @@ class Api:
     def health_last(self):
         return {"last": self._health.last, "history": self._health.history[-60:]}
 
-    def health_quick(self):
-        """Quick check: live readings + drive health + crashes in the last 30 days. Takes 5-30 s; pywebview runs it
-        on its own thread, so the window never freezes."""
-        if not self._checking.acquire(blocking=False):
-            return {"busy": True}
+    def _readings_items(self, ctx=None):
+        """Live readings + drive health + crashes in the last 30 days, as report-card items."""
+        snap = self.snapshot()["summary"]
+        extra = self.pc_status()
+        fans = [x for x in self._hub.latest.sensors.values() if x.kind == "Fan" and x.value is not None
+                and not (x.hw_type or "").startswith("Gpu")]
         try:
-            snap = self.snapshot()["summary"]
-            extra = self.pc_status()
-            fans = [x for x in self._hub.latest.sensors.values() if x.kind == "Fan" and x.value is not None
-                    and not (x.hw_type or "").startswith("Gpu")]
+            crash = explain.serious_crashes(self.crashes_scan(30).get("incidents"))
+        except Exception:  # noqa: BLE001
+            log.exception("health: crashes")
+            crash = None
+        try:
+            drives = [d.get("Verdict") for d in sysinfo.drive_health()]
+        except Exception:  # noqa: BLE001
+            drives = []
+        readings = {"cpu_temp": snap.get("cpu_temp"), "gpu_temp": snap.get("gpu_temp"), "ram_load": snap.get("ram_load"),
+                    "disk_free_pct": extra.get("disk_free_pct"), "disk_free": extra.get("disk_free"),
+                    "fans": "none" if not fans else "good" if any(f.value > 0 for f in fans) else "warn",
+                    "crashes": crash, "drives": drives}
+        return health.quick_items(readings, explain.lights(self._cfg.data.get("alerts")))
+
+    def health_start(self, kind="quick"):
+        """Start a quick or full check in the background. The screen polls health_status() for progress."""
+        j = self._job
+        if j and j.running():
+            return {"busy": True, **j.status()}
+        kind = "full" if kind == "full" else "quick"
+        used = None
+        try:
+            import shutil
+            used = shutil.disk_usage(os.environ.get("SYSTEMDRIVE", "C:") + "\\").used if sys.platform == "win32" else None
+        except OSError:
+            pass
+        online = healthcheck.is_online() if kind == "full" else True
+        self._job = healthcheck.CheckJob(kind, healthcheck.build_steps(kind, self._readings_items, used), online=online)
+        self._job.on_done = self._health.add
+        self._job.start()
+        return self._job.status()
+
+    def health_status(self):
+        j = self._job
+        return j.status() if j else {"running": False, "result": None, "items": []}
+
+    def health_cancel(self):
+        if self._job and self._job.running():
+            self._job.cancel()
+            return True
+        return False
+
+    def health_quick(self):
+        """Quick check without the progress screen (used by the weekly scheduled check). Waits for the result."""
+        if self._job and self._job.running():
+            return {"busy": True}
+        self._job = healthcheck.CheckJob("quick", healthcheck.build_steps("quick", self._readings_items), online=True)
+        self._job.on_done = self._health.add
+        self._job.start(background=False)
+        return self._job.result or {}
+
+    def health_fix(self, fix_id):
+        """A Fix it button on the report card. Risky ones were confirmed (and a restore point made) by the screen."""
+        f = healthcheck.FIXES.get(fix_id)
+        if not f:
+            return {"ok": False, "msg": "Unknown fix"}
+        if f.get("online") and not healthcheck.is_online():
+            return {"ok": False, "msg": "This repair needs an internet connection. Connect and try again."}
+        if not f.get("job"):
             try:
-                crash = explain.serious_crashes(self.crashes_scan(30).get("incidents"))
-            except Exception:  # noqa: BLE001
-                log.exception("health: crashes")
-                crash = None
-            try:
-                drives = [d.get("Verdict") for d in sysinfo.drive_health()]
-            except Exception:  # noqa: BLE001
-                drives = []
-            readings = {"cpu_temp": snap.get("cpu_temp"), "gpu_temp": snap.get("gpu_temp"), "ram_load": snap.get("ram_load"),
-                        "disk_free_pct": extra.get("disk_free_pct"), "disk_free": extra.get("disk_free"),
-                        "fans": "none" if not fans else "good" if any(f.value > 0 for f in fans) else "warn",
-                        "crashes": crash, "drives": drives}
-            res = health.result(health.quick_items(readings, explain.lights(self._cfg.data.get("alerts"))))
-            return self._health.add(res)
-        finally:
-            self._checking.release()
+                if f.get("open"):
+                    os.startfile(f["open"]) if sys.platform == "win32" else None
+                else:
+                    subprocess.Popen(f["cmd"], creationflags=0x08000000 if sys.platform == "win32" else 0)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "msg": f"Couldn't open it: {e}"}
+            if fix_id == "memtest":
+                self._log("fix", "Fix it: scheduled Windows' memory test", undo=False, source="fix", risk=f["risk"],
+                          detail="Windows Memory Diagnostic opened - choose when to restart.")
+            return {"ok": True, "msg": "Opened" if f.get("open") or fix_id.startswith("open_") else "Started"}
+        if self._job and self._job.running():
+            return {"ok": False, "msg": "Another check or repair is still running"}
+
+        def repair(ctx):
+            rc, out = ctx.run(f["cmd"], timeout=2 * 3600)
+            return [healthcheck.repair_item(fix_id, rc, out)]
+        self._job = healthcheck.CheckJob("repair", [healthcheck.Step(fix_id, f["label"], f["est"], repair)])
+
+        def done(_res):
+            it = self._job.items[0] if self._job.items else {}
+            self._log("fix", "Fix it: " + f["label"], undo=False, source="fix", risk=f["risk"], ok=it.get("state") == "good",
+                      detail=it.get("say", ""))
+        self._job.on_done = done
+        self._job.start()
+        return {"ok": True, "msg": "Started", **self._job.status()}
+
+    def health_history(self):
+        return self._health.history[-200:]
+
+    def health_save_text(self):
+        """Save the last report as a text file in Documents\\RigLab reports and show it."""
+        r = self._health.last
+        if not r:
+            return {"ok": False, "msg": "Run a check first"}
+        folder = os.path.join(os.path.expanduser("~"), "Documents", "RigLab reports")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, time.strftime("RigLab health report %Y-%m-%d %H%M.txt", time.localtime(r["time"])))
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(health.report_text(r, APP_VERSION))
+        except OSError as e:
+            return {"ok": False, "msg": f"Couldn't save the report: {e}"}
+        _open_path(path)
+        return {"ok": True, "msg": "Report saved: " + path, "path": path}
+
+    # ------------------------------------------------------------------ Explain my PC
+    def explain_pc(self):
+        inv = self.inventory()
+        return {"items": pcinfo.explain(inv.get("sections") or {})}
+
+    # ------------------------------------------------------------------ storage clean-up
+    def storage_state(self):
+        drives = []
+        try:
+            import psutil
+            for p in psutil.disk_partitions():
+                try:
+                    u = psutil.disk_usage(p.mountpoint)
+                    drives.append({"name": p.mountpoint, "total": u.total, "free": u.free, "pct_free": explain.free_pct(u.total, u.free)})
+                except OSError:
+                    continue
+        except ImportError:
+            pass
+        try:
+            ub, un = storage.folder_size(storage.update_cache_dir(), older_than_days=10) if sys.platform == "win32" else (0, 0)
+        except OSError:
+            ub, un = 0, 0
+        return {"drives": drives, "updates": {"bytes": ub, "files": un}, "big": self.storage_big_status()}
+
+    def storage_big_start(self):
+        if self._big and self._big.get("running"):
+            return self.storage_big_status()
+        roots = storage.user_roots()
+        job = {"running": True, "files": [], "finished": False, "roots": [str(r) for r in roots], "cancel": False, "started": time.time()}
+        self._big = job
+
+        def run():
+            files, done = storage.largest_files(roots, deadline=time.monotonic() + 120, cancelled=lambda: job["cancel"])
+            job.update(files=files, finished=done, running=False)
+        threading.Thread(target=run, name="LargestFiles", daemon=True).start()
+        return self.storage_big_status()
+
+    def storage_big_status(self):
+        j = self._big
+        if not j:
+            return {"running": False, "files": None}
+        return {"running": j["running"], "files": j["files"] if not j["running"] else None, "finished": j["finished"],
+                "roots": j["roots"], "elapsed": time.time() - j["started"]}
+
+    def storage_recycle(self, path):
+        """Move one of the listed big files to the Recycle Bin (only files inside your own folders)."""
+        roots = storage.user_roots()
+        if not storage.inside(path, roots) or not os.path.isfile(path):
+            return {"ok": False, "msg": "RigLab only removes files from your own folders"}
+        size = os.path.getsize(path)
+        if sys.platform != "win32":
+            return {"ok": False, "msg": "Windows only"}
+        script = ("Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
+                  "$env:RIGLAB_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')")
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "RIGLAB_PATH": path}, creationflags=0x08000000)
+        ok = r.returncode == 0 and not os.path.exists(path)
+        self._log("recycle", f"Moved {os.path.basename(path)} to the Recycle Bin ({_size(size)})", undo=False, ok=ok,
+                  detail="You can put it back from the Recycle Bin." if ok else (r.stderr or "")[:200])
+        if ok and self._big and self._big.get("files"):
+            self._big["files"] = [f for f in self._big["files"] if f["path"] != path]
+        return {"ok": ok, "msg": "Moved to the Recycle Bin. You can put it back from there." if ok else "Windows didn't move it (is it open in another app?)"}
+
+    def storage_show(self, path):
+        if sys.platform == "win32" and storage.inside(path, storage.user_roots()):
+            subprocess.Popen(["explorer", "/select,", path])
+            return True
+        return False
+
+    def storage_clean_updates(self):
+        if sys.platform != "win32":
+            return {"ok": False, "msg": "Windows only"}
+        b, n = storage.clean_folder(storage.update_cache_dir(), older_than_days=10)
+        self._log("update_cache", f"Removed {_size(b)} of old Windows update downloads", undo=False, detail=f"{n} files")
+        return {"ok": True, "bytes": b, "files": n, "msg": f"Freed {_size(b)}"}
+
+    # ------------------------------------------------------------------ internet speed test
+    def netspeed_start(self):
+        """Run the speed test in the background (screen polls netspeed_status). Uses Cloudflare's test servers."""
+        if self._net and self._net.running():
+            return self._net.status()
+        H = healthcheck
+
+        def conn(ctx):
+            ctx.data["conn"] = netspeed.connection_info()
+            if not H.is_online():
+                ctx.data["offline"] = True
+            return []
+
+        def server(ctx):
+            if not ctx.data.get("offline"):
+                ctx.data.update(netspeed.meta())
+            return []
+
+        def ping(ctx):
+            if ctx.data.get("offline"):
+                return []
+            n = 10
+            p = netspeed.parse_ping(netspeed.ping_text(ctx.run, n), n)
+            times = p["times"]
+            if times:
+                ctx.data["loss"] = round(p["lost"] / n * 100, 1)
+            else:                                   # ICMP blocked on this network: measure delay over the web instead
+                times = netspeed.http_latency(cancelled=ctx.cancelled)
+                ctx.data["loss"] = None
+            ctx.data["ping"], ctx.data["jitter"] = netspeed.ping_stats(times)
+            return []
+
+        def live(phase):
+            return lambda mbps: ctx_ref[0].data.__setitem__("live", {"phase": phase, "mbps": mbps})
+        ctx_ref = [None]
+
+        def down(ctx):
+            ctx_ref[0] = ctx
+            if not ctx.data.get("offline"):
+                r = netspeed.transfer("down", cancelled=ctx.cancelled, on_rate=live("download"))
+                ctx.data["download"], ctx.data["down_bytes"] = r["mbps"], r["bytes"]
+            ctx.data.pop("live", None)
+            return []
+
+        def up(ctx):
+            ctx_ref[0] = ctx
+            if not ctx.data.get("offline"):
+                r = netspeed.transfer("up", cancelled=ctx.cancelled, on_rate=live("upload"))
+                ctx.data["upload"], ctx.data["up_bytes"] = r["mbps"], r["bytes"]
+            ctx.data.pop("live", None)
+            return []
+
+        def finish(job):
+            d = dict(job.ctx.data)
+            r = {"time": time.time(), "offline": bool(d.get("offline")), **{k: d.get(k) for k in ("download", "upload", "ping", "jitter", "loss", "server", "isp", "ip", "conn")},
+                 "data_mb": round(((d.get("down_bytes") or 0) + (d.get("up_bytes") or 0)) / 1e6, 1)}
+            if not r["offline"] and r["download"] is None and r["upload"] is None:
+                r["error"] = "Cloudflare's test server didn't answer. Try again in a minute."
+            r["summary"] = netspeed.summary(r)
+            r["lights"] = {k: netspeed.light(k, r.get(k)) for k in netspeed.LIGHTS}
+            if not r["offline"] and not r.get("error"):
+                self._net_hist.add(r)
+            return r
+        S = H.Step
+        self._net = H.CheckJob("netspeed", [S("conn", "Checking your connection", 3, conn), S("server", "Finding the nearest test server", 2, server),
+                                            S("ping", "Measuring ping, jitter and packet loss", 11, ping), S("down", "Testing download speed", 10, down),
+                                            S("up", "Testing upload speed", 10, up)], finish=finish)
+        self._net.start()
+        return self._net.status()
+
+    def netspeed_status(self):
+        j = self._net
+        if not j:
+            return {"running": False, "result": None}
+        st = j.status()
+        st["partial"] = {k: v for k, v in (j.ctx.data if j.ctx else {}).items() if k in ("download", "upload", "ping", "jitter", "loss", "offline", "live")}
+        st["phase"] = (st["partial"].get("live") or {}).get("phase") or {2: "ping", 3: "download", 4: "upload"}.get(st.get("index", 0) - 1) if st.get("running") else None
+        return st
+
+    def netspeed_cancel(self):
+        if self._net and self._net.running():
+            self._net.cancel()
+            return True
+        return False
+
+    def netspeed_history(self):
+        return {"items": list(reversed(self._net_hist.items)), "note": netspeed.DATA_NOTE}
+
+    # ------------------------------------------------------------------ start with Windows
+    def autostart_state(self):
+        return {"on": bool(self._cfg.data.get("startup", {}).get("with_windows")), "task": schedule.autostart_on()}
+
+    def autostart_set(self, on, source="you"):
+        ok, msg = schedule.set_autostart(bool(on))
+        if ok:
+            was = self._cfg.data.setdefault("startup", {}).get("with_windows")
+            self._cfg.data["startup"]["with_windows"] = bool(on)
+            self._cfg.save()
+            self._log("autostart", "RigLab starts with Windows: " + ("on" if on else "off"), before={"on": bool(was)}, after={"on": bool(on)},
+                      source=source, detail=msg)
+        return {"ok": ok, "msg": ("RigLab will start when you sign in to Windows." if on else "RigLab won't start with Windows.") if ok
+                else f"Task Scheduler didn't accept it: {msg}"}
+
+    def autostart_first_run(self):
+        """First start of 3.11: turn on start-with-Windows once (the after-boot lighting rescan needs it)."""
+        st = self._cfg.data.setdefault("startup", {})
+        if st.get("with_windows") is not None or sys.platform != "win32":
+            return None
+        r = self.autostart_set(True, source="auto")
+        if r["ok"]:
+            self.startup_notes_list.append({"kind": "light", "title": "Starts with Windows",
+                                            "text": "RigLab now starts when you sign in, so your lights come back after a restart. "
+                                                    "You can turn this off in Settings, or undo it in Change history.", "page": "settings"})
+        else:
+            st["with_windows"] = False
+            self._cfg.save()
+        return r
+
+    # ------------------------------------------------------------------ weekly check
+    def weekly_state(self):
+        return {"on": bool(self._cfg.data.get("health", {}).get("weekly")), "scheduled": schedule.is_scheduled()}
+
+    def weekly_set(self, on, source="you"):
+        ok, msg = schedule.set_weekly(bool(on))
+        if ok:
+            was = bool(self._cfg.data.setdefault("health", {}).get("weekly"))
+            self._cfg.data["health"]["weekly"] = bool(on)
+            self._cfg.save()
+            self._log("weekly", "Weekly quick check " + ("on (Sundays at 7 pm)" if on else "off"), before={"on": was}, after={"on": bool(on)},
+                      source=source, detail=msg)
+        return {"ok": ok, "msg": ("Weekly check is on. It runs on Sundays at 7 pm." if on else "Weekly check is off.") if ok else
+                f"Task Scheduler didn't accept it: {msg}"}
 
     # ------------------------------------------------------------------ change history
-    def _log(self, kind, title, before=None, after=None, undo=True, source="you", risk="Low", detail="", ok=True):
+    def _log(self, kind, title, before=None, after=None, undo=True, source="you", risk="Low", detail="", ok=True, merge=None):
         try:
-            return self._changes.add(kind, title, before, after, undo=undo, source=source, risk=risk, detail=detail, ok=ok)
+            return self._changes.add(kind, title, before, after, undo=undo, source=source, risk=risk, detail=detail, ok=ok, merge=merge)
         except Exception:  # noqa: BLE001
             log.exception("change history")
             return None
 
     def changes_list(self):
         return self._changes.list()
+
+    def changes_summary(self):
+        """For the Undo button in the top bar."""
+        return self._changes.summary()
 
     def change_undo(self, cid):
         e = self._changes.get(cid)
@@ -1029,6 +1429,29 @@ class Api:
             elif k == "gpu_tune":
                 if not self._gpu.reset():
                     raise RuntimeError("The graphics card didn't accept the reset")
+            elif k == "lighting":
+                self._light.set_state(**b["state"])
+            elif k == "light_device":
+                self._light.set_device(b["key"], **b["settings"])
+            elif k == "settings":
+                self._save_settings(b)
+                self._cfg.save()
+            elif k == "appearance":
+                self.ui_set(dict(b, _undo=True))
+            elif k == "overlay":
+                self.overlay_set(dict(b, _undo=True))
+            elif k == "autostart":
+                ok, msg = schedule.set_autostart(bool(b["on"]))
+                if not ok:
+                    raise RuntimeError(msg)
+                self._cfg.data.setdefault("startup", {})["with_windows"] = bool(b["on"])
+                self._cfg.save()
+            elif k == "weekly":
+                ok, msg = schedule.set_weekly(bool(b["on"]))
+                if not ok:
+                    raise RuntimeError(msg)
+                self._cfg.data.setdefault("health", {})["weekly"] = bool(b["on"])
+                self._cfg.save()
             elif k == "preset":
                 self._undo_preset(b)
             elif k == "oc_windows":
@@ -1048,10 +1471,19 @@ class Api:
         return self._cfg.data
 
     def save_settings(self, data):
-        if isinstance(data.get("overlay"), dict):
-            data["overlay"] = {k: v for k, v in data["overlay"].items() if k not in ("x", "y")}   # moved only by dragging
-            self._app._ov_size = None                 # style/size may have changed: let the overlay re-measure
-        for k in ("alerts", "overlay", "logging", "openrgb", "liquidctl"):
+        # the overlay saves itself as you change it (overlay_set), so a stale copy here never overwrites it
+        import copy
+        keys = ("alerts", "logging", "openrgb", "liquidctl", "minimize_to_tray", "poll_interval_ms", "start_minimized")
+        before = {k: copy.deepcopy(self._cfg.data.get(k)) for k in keys}
+        self._save_settings(data)
+        changed = {k: before[k] for k in keys if self._cfg.data.get(k) != before[k]}
+        if changed and not (data or {}).get("_undo"):
+            self._log("settings", "Settings changed: " + ", ".join(SETTING_NAMES.get(k, k) for k in changed), before=changed,
+                      after={k: copy.deepcopy(self._cfg.data.get(k)) for k in changed})
+        return True
+
+    def _save_settings(self, data):
+        for k in ("alerts", "logging", "openrgb", "liquidctl"):
             if k in data:
                 self._cfg[k].update(data[k])
         for k in ("minimize_to_tray", "poll_interval_ms", "start_minimized"):
@@ -1093,6 +1525,66 @@ def _size(b):
         if b < 1024 or u == "GB":
             return f"{b:.0f} {u}" if u == "bytes" else f"{b:.1f} {u}"
         b /= 1024
+
+
+def boot_words(w):
+    """One plain line for the Lights page about the automatic device check (None when there's nothing to say)."""
+    if w is None:
+        return None
+    if getattr(w, "busy", False):
+        return {"state": "none", "say": "RigLab is checking for your lights (this can take up to two minutes after start-up)."}
+    r = getattr(w, "last", None)
+    if not r or r.get("skipped"):
+        return None
+    n = len(r.get("found") or [])
+    when = {"startup": "When RigLab started", "wake": "After the PC woke up", "device": "When a device was plugged in",
+            "manual": "After your rescan"}.get(r.get("reason"), "Last check")
+    if r.get("missing"):
+        extra = " ".join(b["say"] for b in r.get("blocked") or []) or "Check it's plugged in - RigLab keeps watching for it."
+        return {"state": "warn", "say": f"{when}, RigLab found {n} lighting device{'s' if n != 1 else ''} but not {', '.join(r['missing'])}. {extra}"}
+    again = " and reapplied your last effect" if r.get("reapplied") else ""
+    return {"state": "good", "say": f"{when}, RigLab checked for your lights, found {n} device{'s' if n != 1 else ''}{again}."}
+
+
+OVERLAY_KEYS = ("enabled", "stats", "layout", "size", "opacity", "text_color", "snap", "hotkey", "fps_color", "move_hold")
+
+
+APPEARANCE_KEYS = {"theme": "theme", "accent": "highlight colour", "text_scale": "text size", "reduce_motion": "animations",
+                   "pins": "tools pinned to Home"}
+SETTING_NAMES = {"alerts": "too-hot warnings", "logging": "logging", "openrgb": "lighting service", "liquidctl": "fan hubs",
+                 "minimize_to_tray": "keep running", "poll_interval_ms": "sensor refresh", "start_minimized": "start hidden"}
+THEME_IDS = ("dark", "light", "system", "dracula", "nord", "catppuccin", "gruvbox", "solarized", "tokyo", "onedark", "contrast")
+ACCENTS = ("theme", "cyan", "violet", "emerald", "amber", "crimson", "ocean", "mono")
+TEXT_SCALES = (0.8, 1, 1.25, 1.5)
+
+
+MAX_PINS = 4
+DEFAULT_PINS = ["netspeed", "storage", "fans", "overlay"]
+
+
+def ui_values(values: dict) -> dict:
+    """Only known appearance/tour keys with valid values get saved (anything else is ignored)."""
+    out = {}
+    for k, v in (values or {}).items():
+        if k == "theme" and v in THEME_IDS:
+            out[k] = v
+        elif k == "accent" and v in ACCENTS:
+            out[k] = v
+        elif k == "start_page" and isinstance(v, str) and len(v) < 40:
+            out[k] = v
+        elif k == "view" and v in ("simple", "advanced"):
+            out[k] = v
+        elif k == "text_scale" and isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = min(TEXT_SCALES, key=lambda x: abs(x - float(v)))
+        elif k == "tour_done" and isinstance(v, bool):
+            out[k] = v
+        elif k == "reduce_motion" and isinstance(v, bool):
+            out[k] = v
+        elif k == "tips_hidden" and isinstance(v, list):
+            out[k] = [str(x)[:40] for x in v][:100]
+        elif k == "pins" and isinstance(v, list):          # tools pinned to Home (up to 4, no repeats)
+            out[k] = list(dict.fromkeys(str(x)[:40] for x in v if isinstance(x, str) and x.strip()))[:MAX_PINS]
+    return out
 
 
 def _num(s: str) -> str:

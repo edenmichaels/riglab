@@ -22,12 +22,15 @@ def test_needs_fps(o, expected):
     assert ov.needs_fps(o) is expected
 
 
-def test_guess_size_grows_with_text_size_and_fps_row():
-    small = ov.guess_size({"mode": "fps", "size": "s"})
-    large = ov.guess_size({"mode": "fps", "size": "l"})
+def test_guess_size_grows_with_text_size_and_stats():
+    small = ov.guess_size({"stats": ["fps"], "size": "s"})
+    large = ov.guess_size({"stats": ["fps"], "size": "l"})
     assert large[0] > small[0] and large[1] > small[1]
-    assert ov.guess_size({"mode": "full", "show_fps": True})[1] > ov.guess_size({"mode": "full"})[1]
-    assert ov.guess_size({"mode": "fps"})[0] < ov.guess_size({"mode": "full"})[0]   # counter is smaller
+    full_h = ov.guess_size({"stats": ov.PRESETS["full"], "layout": "horizontal"})
+    full_v = ov.guess_size({"stats": ov.PRESETS["full"], "layout": "vertical"})
+    assert full_h[0] > full_v[0] and full_v[1] > full_h[1]
+    assert ov.guess_size({"stats": ["fps"]})[0] < full_h[0]
+    assert ov.guess_size({"stats": ["fps"], "minimised": True}) == (ov.DOT, ov.DOT)
 
 
 @pytest.mark.parametrize("corner, xy", [

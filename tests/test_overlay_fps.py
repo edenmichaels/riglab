@@ -74,13 +74,23 @@ def test_reading_for_foreground_game():
     assert cap.reading_for(88, now=500.0)["app"] == "browser.exe"
 
 
-def test_reading_for_hides_row_when_nothing_rendering_in_front():
+def test_reading_falls_back_to_the_app_that_is_drawing():
+    """3.11: a game whose window belongs to another process (launcher, anti-cheat wrapper, Store app) used to make the
+    FPS counter hide itself - one cause of the overlay 'disappearing'. Now the busiest app drawing frames is used."""
     cap = pm.Capture()
     for t, ms in frames(120, 2, end=500.0):
         cap.add("game.exe", 77, ms, now=t)
-    assert cap.reading_for(1234, now=500.0) == {"state": "no_game"}      # desktop/other app in front
-    assert cap.reading_for(None, now=500.0) == {"state": "no_game"}
+    r = cap.reading_for(1234, now=500.0)
+    assert r["state"] == "ok" and r["app"] == "game.exe" and r["guess"] is True and 110 < r["fps"] < 130
+    assert cap.reading_for(77, now=500.0)["guess"] is False
+    assert cap.reading_for(None, now=500.0)["state"] == "ok"
     assert cap.reading_for(77, now=510.0) == {"state": "no_game"}        # game stopped presenting: no stale number
+
+
+def test_pick_reading_ignores_slow_background_apps():
+    assert pm.pick_reading(5, {5: None, 6: {"fps": 4}}) is None              # a 4 FPS launcher isn't a game
+    assert pm.pick_reading(5, {5: None, 6: {"fps": 60}, 7: {"fps": 144}})[0] == 7
+    assert pm.pick_reading(6, {6: {"fps": 30}, 7: {"fps": 144}})[0] == 6    # the window in front wins if it draws
 
 
 def test_live_history_is_bounded():

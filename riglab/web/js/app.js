@@ -12,40 +12,32 @@ const App = {
   view: "simple",     // "simple" (default) or "advanced"
 };
 
-// [page, Advanced name, icon, Simple name]. No Simple name = only listed in Advanced view (still reachable).
-const NAV = [
-  ["home", "Home", "home", "Home"],
-  ["label", "Monitor", null, "My PC"],
-  ["dashboard", "Dashboard", "dash", "PC Health"],
-  ["sensors", "Sensors", "pulse"],
-  ["hardware", "Hardware", "chip"],
-  ["crashes", "Crash Center", "alert", "Crashes & freezes"],
-  ["label", "Test", null, "Tools"],
-  ["benchmark", "Benchmark", "bench"],
-  ["stress", "Stress test", "flame"],
-  ["label", "Control"],
-  ["overclock", "Overclocking", "bolt"],
-  ["tweaks", "Tweaks", "sliders", "Performance Tweaks"],
-  ["cooling", "Cooling", "fan", "Fans"],
-  ["lighting", "Lighting", "light", "Lights"],
-  ["benchmark", null, "bench", "Speed test"],
-  ["label", "App", null, "RigLab"],
-  ["history", "Change history", "undo", "Change history"],
-  ["health", "RigLab setup", "heart"],
-  ["settings", "Settings", "gear", "Settings"],
-];
+/* 3.12: the left menu is just five places (window.MENU in features.js). Everything else is a tile on Tools, or
+   a tab in Settings - and every page knows which of the five it belongs to, so that item stays lit. */
+const NAV = (window.MENU || []).map(m => [m.page, m.name, m.icon, m.name]);
+function navItems() { return NAV.map(([id, name, ic]) => [id, name, ic]); }
+function sectionOf(page) {
+  if (["home", "dashboard", "lighting", "tools"].includes(page)) return page;
+  if ((window.SETTINGS_TABS || []).some(t => t.page === page)) return "settings";
+  return "tools";
+}
+const TOOL_PAGES = new Set((window.FEATURES || []).filter(f => f.tile).map(f => f.advanced.page));
 
-function navItems() {
-  const simple = isSimple();
-  return NAV.map(([id, adv, ic, easy]) => [id, simple ? easy : adv, ic]).filter(([, label]) => label);
+/* open a feature from the feature list (search, Tools tiles, Home pins): switches to Advanced view first if it's
+   an advanced-only feature in Simple view */
+function openFeature(f) {
+  const S = isSimple(), t = S ? f.simple : f.advanced;
+  if (S && t.link) return openAdvanced(f.advanced.page, { focus: f.advanced.focus, tab: f.advanced.tab });
+  if (t.tab && App.pages[t.page]) App.pages[t.page].tab = t.tab;
+  go(t.page, t.focus ? { focus: t.focus } : {});
 }
 
 /* Switches instantly (no restart): redraws the menu and the current page, keeping the same tab. Saved as ui.view. */
-async function setView(v) {
+async function setView(v, stay = true) {
   App.view = v === "advanced" ? "advanced" : "simple";
   drawNav();
   drawTopbar();
-  if (App.pageId) go(App.pageId);
+  if (stay && App.pageId) go(App.pageId);
   try { await App.api.ui_set({ view: App.view }); } catch { /* preview */ }
 }
 
@@ -54,31 +46,108 @@ function drawTopbar() {
   if (!box) return;
   const S = isSimple();
   const b = (v, l, tip) => h("button" + ((v === "simple") === S ? ".on" : ""), { title: tip, "aria-pressed": (v === "simple") === S, onclick: () => { if ((v === "simple") !== S) setView(v); } }, l);
-  box.replaceChildren(
+  box.replaceChildren(...[                         // (no null children: DOM methods would print the word "null")
     App.demo ? h("div.demo-tag", "Preview mode · simulated data") : null,
+    Search.el(),
     h("div.spacer"),
+    UndoBtn.el(),
     h("span.small.muted", { style: { marginRight: "4px" } }, "View:"),
     h("div.seg.seg-sm", { role: "group", "aria-label": "Simple or Advanced view" },
       b("simple", "Simple", "Plain words, traffic lights, risky settings hidden"),
       b("advanced", "Advanced", "Every sensor, setting and technical detail")),
-    infoTip("Simple view uses plain words and hides risky settings. Advanced view shows every sensor, setting and technical detail. Nothing is removed in Simple view - switch any time."));
+    infoTip("Simple view uses plain words and hides risky settings. Advanced view shows every sensor, setting and technical detail. Nothing is removed in Simple view - switch any time."),
+    h("button.btn.sm.aa", { title: "Text size", "aria-label": "Text size", onclick: (e) => textSizeMenu(e.currentTarget) },
+      h("span", { style: { fontSize: "11px" } }, "A"), h("span", { style: { fontSize: "16px", fontWeight: 700 } }, "a"))].filter(Boolean));
+}
+
+/* ------------------------------------------------------------------ search (top bar): jump to any tool or setting */
+const Search = {
+  box: null,
+  el() {
+    if (this.box) return this.box;
+    const inp = h("input.search-in", { type: "search", placeholder: "Search tools and settings", "aria-label": "Search tools and settings", autocomplete: "off",
+      oninput: () => this.show(inp.value), onfocus: () => inp.value && this.show(inp.value),
+      onkeydown: (e) => {
+        const rows = $$(".search-row", this.list);
+        const i = rows.indexOf(document.activeElement);
+        if (e.key === "ArrowDown" && rows.length) { e.preventDefault(); rows[0].focus(); }
+        if (e.key === "Enter" && this.results && this.results.length) { e.preventDefault(); this.pick(this.results[0]); }
+        if (e.key === "Escape") this.close();
+        void i;
+      } });
+    this.inp = inp;
+    this.list = h("div.search-list.hide", { role: "listbox" });
+    this.box = h("div.gsearch", icon("search"), inp, this.list);
+    document.addEventListener("click", (e) => { if (this.box && !this.box.contains(e.target)) this.close(); });
+    return this.box;
+  },
+  show(q) {
+    this.results = window.searchFeatures(q, window.FEATURES, isSimple());
+    this.list.classList.toggle("hide", !q.trim());
+    this.list.replaceChildren(...(this.results.length ? this.results.map((r, n) => h("button.search-row", { role: "option", "data-feature": r.f.id,
+      onclick: () => this.pick(r), onkeydown: (e) => {
+        const rows = $$(".search-row", this.list);
+        if (e.key === "ArrowDown") { e.preventDefault(); (rows[n + 1] || rows[0]).focus(); }
+        if (e.key === "ArrowUp") { e.preventDefault(); n ? rows[n - 1].focus() : this.inp.focus(); }
+        if (e.key === "Escape") { this.close(); this.inp.focus(); }
+      } },
+      icon((r.f.tile || {}).icon || "search"), h("span", r.f.name), r.advanced ? h("span.pill.adv", "Advanced") : null,
+      h("span.small.muted", (MENU_NAME[sectionOf(r.f.advanced.page)] || "")))) : [h("div.small.muted", { style: { padding: "8px 10px" } }, "Nothing found. Try another word, like fans, lights or speed.")]));
+  },
+  pick(r) { this.close(); this.inp.value = ""; openFeature(r.f); },
+  close() { if (this.list) this.list.classList.add("hide"); },
+};
+const MENU_NAME = Object.fromEntries((window.MENU || []).map(m => [m.page, m.name]));
+
+function textSizeMenu(anchor) {
+  const old = $(".aa-menu"); if (old) { old.remove(); return; }
+  const r = anchor.getBoundingClientRect(), z = +Theme.cur.text_scale || 1;
+  const menu = h("div.aa-menu", { role: "menu", style: { top: (r.bottom / z + 6) + "px", right: (document.documentElement.clientWidth - r.right) / z + "px" } },
+    h("div.small.muted", { style: { padding: "4px 8px 6px" } }, "Text size"),
+    TEXT_SIZES.map(([v, l]) => h("button" + (+Theme.cur.text_scale === v ? ".on" : ""), { role: "menuitemradio", "aria-checked": +Theme.cur.text_scale === v,
+      onclick: () => { menu.remove(); Theme.set({ text_scale: v }); } }, h("span", { style: { fontSize: (13 * v) + "px" } }, l), h("span.small.muted", Math.round(v * 100) + "%"))));
+  document.body.append(menu);
+  setTimeout(() => document.addEventListener("click", function off(e) { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener("click", off); } }), 0);
 }
 
 // ------------------------------------------------------------------ appearance
-const THEME_ACCENTS = { cyan: "Cyan", violet: "Violet", emerald: "Emerald", amber: "Amber", crimson: "Crimson", ocean: "Ocean", mono: "Graphite" };
+const THEME_ACCENTS = { theme: "Theme", cyan: "Cyan", violet: "Violet", emerald: "Emerald", amber: "Amber", crimson: "Crimson", ocean: "Ocean", mono: "Graphite" };
+/* [id, name, credit]. Colours live in app.css under [data-theme="id"]. Palettes are MIT-licensed. */
+const THEMES = [
+  ["dark", "Dark", "RigLab's own"],
+  ["light", "Light", "RigLab's own"],
+  ["system", "Match Windows", "Dark or Light, following Windows"],
+  ["dracula", "Dracula", "Dracula Theme by Zeno Rocha and contributors (MIT licence)"],
+  ["nord", "Nord", "Nord by Arctic Ice Studio and Sven Greb (MIT licence)"],
+  ["catppuccin", "Catppuccin Mocha", "Catppuccin by the Catppuccin organisation (MIT licence)"],
+  ["gruvbox", "Gruvbox", "Gruvbox by Pavel Pertsev (MIT licence)"],
+  ["solarized", "Solarized Dark", "Solarized by Ethan Schoonover (MIT licence)"],
+  ["tokyo", "Tokyo Night", "Tokyo Night by enkia (MIT licence)"],
+  ["onedark", "One Dark", "One Dark by GitHub / Atom (MIT licence)"],
+  ["contrast", "High Contrast", "RigLab's own, for easier reading"],
+];
+const TEXT_SIZES = [[0.8, "Small"], [1, "Normal"], [1.25, "Large"], [1.5, "Extra Large"]];
 const Theme = {
-  cur: { theme: "dark", accent: "cyan" },
+  cur: { theme: "dark", accent: "cyan", text_scale: 1 },
+  mode() { return this.cur.theme === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : this.cur.theme; },
   apply(t) {
     this.cur = Object.assign({}, this.cur, t);
-    const mode = this.cur.theme === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : this.cur.theme;
-    document.documentElement.dataset.theme = mode;
-    document.documentElement.dataset.accent = this.cur.accent;
+    if (!THEMES.some(([id]) => id === this.cur.theme)) this.cur.theme = "dark";
+    const d = document.documentElement;
+    d.dataset.theme = this.mode();
+    d.dataset.accent = this.cur.accent || "theme";
+    d.classList.toggle("reduce-motion", !!this.cur.reduce_motion);
+    const z = TEXT_SIZES.some(([v]) => v === +this.cur.text_scale) ? +this.cur.text_scale : 1;
+    this.cur.text_scale = z;
+    d.style.setProperty("--zoom", z);
+    document.body && (document.body.style.zoom = z);
     try { localStorage.setItem("riglab.theme", JSON.stringify(this.cur)); } catch { /* ignore */ }
   },
   async set(t) {
     this.apply(t);
     try { await App.api.ui_set(t); } catch { /* preview mode */ }
-    if (App.page && App.pageId) go(App.pageId);         // redraw canvases with the new colours
+    if (App.page && App.pageId) go(App.pageId);         // redraw canvases with the new colours and size
+    drawTopbar();
   },
 };
 matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { if (Theme.cur.theme === "system") Theme.apply({}); });
@@ -86,9 +155,10 @@ matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { i
 function drawNav() {
   const box = $("#navbox");
   if (!box) return;
-  box.replaceChildren(...navItems().map(([id, label, ic]) => id === "label" ? h("div.nav-label", label)
-    : h("div.nav", { "data-page": id, onclick: () => go(id) }, icon(ic), h("span", label), id === "health" ? h("i.dot.hide#healthdot") : null)));
-  $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.page === App.pageId));
+  box.replaceChildren(...navItems().map(([id, label, ic]) =>
+    h("div.nav", { "data-page": id, role: "link", tabIndex: 0, onclick: () => go(id), onkeydown: (e) => { if (e.key === "Enter") go(id); } },
+      icon(ic), h("span", label), id === "settings" ? h("i.dot.hide#healthdot") : null)));
+  $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.page === sectionOf(App.pageId)));
   const s = isSimple();
   $("#ft-cpu-k").textContent = s ? "Processor" : "CPU";
   $("#ft-gpu-k").textContent = s ? "Graphics" : "GPU";
@@ -110,11 +180,12 @@ function buildShell() {
   drawTopbar();
 }
 
-function go(id) {
+/* go(page, {focus: "anchor"}) - opts.focus scrolls to and highlights an element with data-anchor="anchor". */
+function go(id, opts = {}) {
   if (App.page && App.page.leave) App.page.leave();
   const P = App.pages[id];
   if (!P) return;
-  $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.page === id));
+  $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.page === sectionOf(id)));
   const main = $("#main");
   main.innerHTML = "";
   main.scrollTop = 0;
@@ -123,8 +194,26 @@ function go(id) {
   App.page = P;
   App.pageId = id;
   try { localStorage.setItem("riglab.page", id); } catch { /* storage may be off */ }
-  P.render(el);
+  const r = P.render(el);
+  const tip = typeof Tips !== "undefined" ? Tips.banner(id) : null;
+  if (tip) el.prepend(tip);
+  if (sectionOf(id) === "settings") el.prepend(settingsTabs(id));            // General | Themes | RigLab setup
+  else if (sectionOf(id) === "tools" && id !== "tools")                        // every tool has a way back to the grid
+    el.prepend(h("button.btn.ghost.sm.back-btn", { onclick: () => go("tools"), "aria-label": "Back to Tools" }, icon("back"), "Tools"));
   if (App.snap && P.tick) P.tick(App.snap);
+  if (opts.focus) Promise.resolve(r).then(() => setTimeout(() => {
+    const a = $(`[data-anchor="${opts.focus}"]`, el);
+    for (let d = a && a.closest("details"); d; d = d.parentElement && d.parentElement.closest("details")) d.open = true;
+    if (a) { a.scrollIntoView({ block: "start", behavior: "smooth" }); a.classList.add("flash"); setTimeout(() => a.classList.remove("flash"), 2200); }
+  }, 350));
+}
+
+function settingsTabs(cur) {
+  const S = isSimple();
+  return h("div.seg.settings-tabs", { role: "tablist", "aria-label": "Settings" }, (window.SETTINGS_TABS || []).map(t =>
+    h("button" + (t.page === cur ? ".on" : ""), { role: "tab", "aria-selected": t.page === cur, "data-tab": t.page,
+      title: S && t.advanced ? "An advanced feature - opens in Advanced view" : t.name,
+      onclick: () => (S && t.advanced) ? openAdvanced(t.page) : go(t.page) }, t.name, S && t.advanced ? h("span.pill.adv", "Advanced") : null)));
 }
 
 async function loop() {
@@ -155,20 +244,27 @@ async function refreshHealth() {
   } catch { return []; }
 }
 
+const WEB_VERSION = "3.12.0";      // must match APP_VERSION in riglab/core/config.py (checked by a test)
+
 async function start() {
   if (window.pywebview && window.pywebview.api) { App.api = window.pywebview.api; }
   else { App.api = new DemoApi(); App.demo = true; }
   App.info = await App.api.info();
   const ui = App.info.ui || {};
-  Theme.apply({ theme: ui.theme || Theme.cur.theme, accent: ui.accent || Theme.cur.accent });
+  Theme.apply({ theme: ui.theme || Theme.cur.theme, accent: ui.accent || Theme.cur.accent, text_scale: ui.text_scale || 1, reduce_motion: !!ui.reduce_motion });
   App.view = (App.info.view || ui.view) === "advanced" ? "advanced" : "simple";
   buildShell();
-  $("#ver").textContent = "v" + App.info.version;
+  $("#ver").textContent = "v" + (App.info.version || WEB_VERSION);
+  if (!App.demo && App.info.version && App.info.version !== WEB_VERSION) {
+    // the program and its screens don't match (old screens kept by the window's browser): say so plainly
+    $("#main").before(h("div.mt", banner("bad", "alert", `<b>RigLab's screens are out of date</b> (screens ${WEB_VERSION}, program ${App.info.version}). Right-click RigLab in the system tray, choose Quit, then open RigLab again.`)));
+  }
   const start = ui.start_page || "home";
   let first = start;
   if (start === "last") { try { first = localStorage.getItem("riglab.page") || "home"; } catch { first = "home"; } }
   App.snap = await App.api.snapshot();
   go(App.pages[first] ? first : "home");
+  if (!ui.tour_done) setTimeout(() => Tour.start(), 900);      // first launch: show the walkthrough once
   loop();
   refreshHealth();
   setInterval(refreshHealth, 15000);
@@ -179,3 +275,61 @@ let started = false;
 const boot = () => { if (!started) { started = true; start(); } };
 window.addEventListener("pywebviewready", boot);
 window.addEventListener("load", () => setTimeout(() => { if (!window.pywebview) boot(); }, 700));
+
+/* ------------------------------------------------------------------ central Undo (top bar)
+   Undo = the newest change that can be undone. The arrow lists recent changes from Change history, each with
+   its own Undo. Greyed out when there's nothing to undo. Medium/High risk changes ask first. */
+const UndoBtn = {
+  sum: null, box: null, busy: false,
+  el() {
+    this.box = this.box || h("div.undo-split");
+    this.render();
+    this.refresh();
+    return this.box;
+  },
+  async refresh() {
+    try { this.sum = await App.api.changes_summary(); } catch { this.sum = null; }
+    this.render();
+  },
+  render() {
+    if (!this.box) return;
+    const last = this.sum && this.sum.last;
+    const main = h("button.btn.sm.undo-main", { disabled: !last || this.busy, "aria-label": last ? "Undo last change: " + last.title : "Nothing to undo",
+      title: last ? "Undo last change (" + last.title + ")" : "Undo last change - nothing to undo yet", onclick: () => last && this.undo(last) }, icon("undo"), "Undo");
+    const caret = h("button.btn.sm.undo-caret", { "aria-label": "Recent changes", title: "Recent changes", "aria-haspopup": "menu",
+      disabled: !(this.sum && this.sum.recent && this.sum.recent.length), onclick: (e) => this.menu(e.currentTarget) }, "▾");
+    this.box.replaceChildren(main, caret);
+  },
+  async undo(e) {
+    if (["Medium", "High"].includes(e.risk)) {
+      const ok = await modal({ title: "Undo this change?", body: [h("p", h("b", e.title)), h("p", `This was a ${e.risk.toLowerCase()} risk change. Undoing it puts the setting back the way it was before.`)],
+        buttons: [{ label: "Cancel", value: false }, { label: "Undo it", value: true, cls: "primary" }] });
+      if (!ok) return;
+    }
+    this.busy = true; this.render();
+    let r;
+    try { r = await App.api.change_undo(e.id); } catch (x) { r = { ok: false, msg: String(x) }; }
+    this.busy = false;
+    toast(r.msg, !r.ok);
+    if (r.ok && e.kind === "appearance") {           // put the old theme / text size back on screen too
+      try { App.info = await App.api.info(); Theme.apply(App.info.ui || {}); } catch { /* preview */ }
+    }
+    await this.refresh();
+    if (r.ok && App.pageId) go(App.pageId);
+  },
+  menu(anchor) {
+    const old = $(".undo-menu"); if (old) { old.remove(); return; }
+    const z = +Theme.cur.text_scale || 1, r = anchor.getBoundingClientRect();
+    const when = (t) => new Date(t * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+    const menu = h("div.undo-menu.aa-menu", { role: "menu", style: { top: (r.bottom / z + 6) + "px", right: (document.documentElement.clientWidth - r.right) / z + "px" } },
+      h("div.small.muted", { style: { padding: "4px 8px 6px" } }, "Recent changes"),
+      (this.sum.recent || []).map(e => h("div.undo-row", { role: "menuitem" },
+        h("div", { style: { minWidth: 0 } }, h("div.undo-t", e.title), h("div.small.muted", when(e.time) + (e.risk && !["None", "Low"].includes(e.risk) ? ` · ${e.risk} risk` : ""))),
+        e.undoable ? h("button.btn.sm", { onclick: () => { menu.remove(); this.undo(e); } }, "Undo")
+          : h("span.small.muted", e.undone_by ? "Undone" : e.source === "undo" ? "" : "Can't undo"))),
+      h("button.btn.sm.ghost", { style: { width: "100%", marginTop: "6px" }, onclick: () => { menu.remove(); go("history"); } }, "See all in Change history"));
+    document.body.append(menu);
+    setTimeout(() => document.addEventListener("click", function off(ev) { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener("click", off); } }), 0);
+  },
+};
+setInterval(() => { if (!document.hidden && App.api) UndoBtn.refresh(); }, 5000);

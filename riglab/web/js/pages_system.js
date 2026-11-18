@@ -27,25 +27,22 @@ App.pages.tweaks = {
   async redraw() { this.draw(await App.api.tweaks_state()); },
   draw(st) {
     const S = isSimple(), parts = [];
-    if (!st.admin) parts.push(banner("bad", "alert", S ? "Some of these need RigLab to have full permission (administrator)." : "Some tweaks need RigLab running as administrator.",
-      h("button.btn.sm", { onclick: () => App.api.fix("restart_admin") }, S ? "Give RigLab permission" : "Restart as admin")));
 
-    parts.push(h("div.card.glow", cardHead(S ? "One click for gamers" : "Recommended for gaming", "rocket"),
-      h("div.sub", "Switches on Game Mode and switches off background game recording. Only changes what isn't set already."),
-      actionBtn("tweaks.recommended", async () => { const r = await App.api.tweaks_recommended(); toast(r.msg, !r.ok); this.redraw(); }, { cls: "primary", icon: "rocket" })));
 
     const plainPlan = (p) => PLAN_PLAIN[p.name.toLowerCase()] || [p.name, ""];
     const plans = h("div.plans", st.plans.map(p => h("div.plan" + (p.active ? ".on" : ""), { role: "button", tabIndex: 0,
       onclick: async () => { if (p.active) return; const ok = await guarded("power.plan", () => App.api.set_power_plan(p.guid)); if (ok != null) { toast(S ? "Now using: " + plainPlan(p)[0] : "Power plan: " + p.name); this.redraw(); } } },
       h("div.n", S ? plainPlan(p)[0] : p.name), h("div.small.muted", p.active ? (S ? "In use now" : "Active") : (S ? plainPlan(p)[1] || "Click to use" : "Click to use")))));
-    parts.push(h("div.card.mt", cardHead(S ? "How hard should my PC work?" : "Power plan", "bolt", infoBtn("power.plan"),
+    parts.push(h("div.card", { "data-anchor": "power" }, cardHead(S ? "How hard should my PC work?" : "Power plan", "bolt", infoBtn("power.plan"),
       actionBtn("power.ultimate", async () => { await App.api.add_ultimate(); this.redraw(); }, { cls: "sm", label: S ? "+ Maximum speed" : "+ Ultimate Performance" })),
       h("div.sub", S ? "Pick one. You can change it back any time." : "High performance / Ultimate keep clocks up for lower latency but use more power. Balanced is fine for most modern CPUs."),
       st.plans.length ? plans : h("div.muted.small", "Windows only.")));
+    if (!st.admin) parts.push(h("div.mt", banner("bad", "alert", S ? "Some of these need RigLab to have full permission (administrator)." : "Some tweaks need RigLab running as administrator.",
+      h("button.btn.sm", { onclick: () => App.api.fix("restart_admin") }, S ? "Give RigLab permission" : "Restart as admin"))));
 
     const cats = {};
     for (const t of st.tweaks) (cats[t.cat] ||= []).push(t);
-    const tcard = h("div.card.mt", cardHead(S ? "Windows settings" : "Windows & gaming", "sliders"));
+    const tcard = h("div.card.mt", { "data-anchor": "windows" }, cardHead(S ? "Windows settings" : "Windows & gaming", "sliders"));
     let shownCount = 0;
     for (const [cat, list] of Object.entries(cats)) {
       const rows = list.map(t => {
@@ -59,12 +56,14 @@ App.pages.tweaks = {
       shownCount += rows.length;
       tcard.append(h("div.nav-label", { style: { padding: "10px 0 0" } }, S ? ({ Gaming: "Games", Input: "Mouse", Visual: "Looks", Network: "Internet" }[cat] || cat) : cat), ...rows);
     }
-    if (S && st.tweaks.length > shownCount) tcard.append(h("div.small.muted", { style: { paddingTop: "10px" } }, "More settings are in Advanced view. Use the Simple / Advanced switch at the top of the window."));
     parts.push(tcard);
+    if (S) parts.push(h("div.mt.stack", { style: { gap: "8px" } },
+      st.tweaks.length > shownCount ? advLink("More Windows settings (GPU scheduling, network throttling)", "tweaks", { focus: "windows", desc: "Medium-risk settings that need a restart." }) : null,
+      advLink("Graphics card power limit", "tweaks", { focus: "gpu", icon: "gpu", desc: "Make the graphics card cooler and quieter by limiting its power." })));
 
     if (!S) {
       const g = st.gpu;
-      const gcard = h("div.card.mt", cardHead("Graphics card power limit", "gpu", infoBtn("gpu.power_limit")));
+      const gcard = h("div.card.mt", { "data-anchor": "gpu" }, cardHead("Graphics card power limit", "gpu", infoBtn("gpu.power_limit")));
       if (g && !g.error) {
         let w = Math.round(g.cur);
         gcard.append(h("div.sub", `${g.name} · allowed ${Math.round(g.min)}–${Math.round(g.max)} W. Lower = cooler & quieter for a small FPS loss. Resets on reboot.`),
@@ -74,23 +73,26 @@ App.pages.tweaks = {
       parts.push(gcard);
     }
 
-    const startup = h("div.card.mt", cardHead(S ? "Apps that open when Windows starts" : "Startup apps", "power", infoBtn("startup.toggle")),
+    const IMPACT = { High: "bad", Medium: "warn", Low: "good" };
+    const startup = h("div.card.mt", { "data-anchor": "startup" }, cardHead(S ? "Apps that open when Windows starts" : "Startup apps", "power", infoBtn("startup.toggle")),
       h("div.sub", S ? "Fewer apps here means Windows starts faster. Switching one off doesn't delete it - you can still open it yourself." : "Turn off apps you don't need starting with Windows. Same switch Task Manager uses - nothing is deleted."),
       st.startup.length ? h("div", st.startup.map(x => {
+        const pill = x.impact ? h("span.pill.impact." + IMPACT[x.impact], { title: x.why, style: { marginLeft: "8px" } }, x.impact + " impact") : null;
         const row = switchRow("startup.toggle", x.on, async (v) => { const r = await App.api.startup_set(x.i, v); if (r !== "ok") { toast(r, true); return false; } return true; },
-          { label: x.name, desc: S ? (x.on ? "Opens when Windows starts" : "Doesn't open by itself") : x.where + " · " + (x.cmd.length > 90 ? x.cmd.slice(0, 90) + "…" : x.cmd) });
+          { label: x.name, pills: pill ? [pill] : [], desc: S ? (x.why || (x.on ? "Opens when Windows starts" : "Doesn't open by itself")) : x.where + " · " + (x.cmd.length > 90 ? x.cmd.slice(0, 90) + "…" : x.cmd) });
         if (!S) row.querySelector(".d").title = x.cmd;
         return row;
-      })) : h("div.muted.small", "Nothing found."));
+      })) : h("div.muted.small", "Nothing found."),
+      h("details.key", h("summary", "What do the impact ratings mean?"), h("div.key-body",
+        h("div.key-row", h("span.pill.bad.impact", "High impact"), "Slows Windows down for a while after it starts. Good to switch off if you don't need it straight away."),
+        h("div.key-row", h("span.pill.warn.impact", "Medium impact"), "Uses a little time and memory when Windows starts."),
+        h("div.key-row", h("span.pill.good.impact", "Low impact"), "A small helper. It barely affects start-up."),
+        h("div.small.muted", "These are RigLab's estimates from the app's name and size. Windows doesn't say exactly."))));
     parts.push(startup);
 
-    const junkTxt = h("span.muted.small", "");
     parts.push(h("div.card.mt", cardHead(S ? "Free up space" : "Junk cleanup", "trash"),
-      h("div.sub", S ? "Deletes temporary files Windows and games don't need any more. Your own files are never touched." : "Deletes temp files and shader caches older than 24 h. Files in use are skipped. Games rebuild shader caches on next launch."),
-      h("div.row.wrap", { style: { gap: "10px" } },
-        actionBtn("junk.scan", async () => { junkTxt.textContent = "Looking…"; const r = await App.api.junk(false); junkTxt.textContent = `${fmt.bytes(r.bytes)} can be freed (${fmt.n(r.files)} files)`; }, { icon: "search", label: S ? undefined : "Scan" }),
-        actionBtn("junk.clean", async () => { junkTxt.textContent = "Cleaning…"; const r = await App.api.junk(true); junkTxt.textContent = `Freed ${fmt.bytes(r.bytes)} (${fmt.n(r.files)} files)`; }, { icon: "trash", label: S ? undefined : "Clean" }),
-        junkTxt)));
+      h("div.sub", "Temporary files, old Windows update files and your biggest files are now on their own page."),
+      h("button.btn", { onclick: () => go("storage") }, icon("trash"), S ? "Go to Free up space" : "Open Storage cleanup")));
     this.body.replaceChildren(...parts);
   },
 };
@@ -114,9 +116,29 @@ App.pages.health = {
       h("br"), "• A ", h("b", "Corsair Lighting Node"), " → lighting only; the fans' speed cables go to the motherboard.",
       h("br"), "• An ", h("b", "iCUE LINK System Hub"), " → not supported by open-source tools yet; use iCUE, or FanControl with the CorsairLink plugin."));
     el.append(isSimple() ? details("Why can't RigLab control my Corsair fans?", corsair) : corsair);
+    this.logBox = h("div.card.mt", { "data-anchor": "startlog" });
+    el.append(this.logBox);
+    this.drawLog();
     this.load();
     const st = await App.api.lhm_status();
     if (st.running) this.watch();
+  },
+  /* Start-up log: what RigLab scanned and found at start-up, after sleep and when devices were plugged in. */
+  async drawLog() {
+    let r = { items: [], text: "" };
+    try { r = await App.api.startup_log(); } catch { /* none */ }
+    if (!this.logBox || !this.logBox.isConnected && this.logBox.dataset.drawn) return;
+    this.logBox.dataset.drawn = "1";
+    const lv = { info: "good", warn: "warn", error: "bad" };
+    const rows = (r.items || []).slice(0, 60).map(e => h("div.log-row", dot(lv[e.level] || "none"),
+      h("span.small.muted.mono", new Date(e.time * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" })),
+      h("span", safe(e.text))));
+    this.logBox.replaceChildren(cardHead("Start-up log", "report",
+        h("button.btn.sm", { onclick: () => this.drawLog() }, icon("refresh"), "Refresh"),
+        h("button.btn.sm", { onclick: () => navigator.clipboard.writeText(r.text || "").then(() => toast("Start-up log copied - paste it when asking for help"), () => toast("Couldn't copy", true)) }, icon("download"), "Copy")),
+      h("div.sub", "What RigLab looked for when it started, after the PC woke from sleep, and when devices were plugged in - and what it found."),
+      rows.length ? h("div.log-list", rows) : h("div.small.muted", "Nothing logged yet."),
+      colourKey({ label: "What do the dots mean?" }));
   },
   async load() {
     this.box.replaceChildren(h("div.empty", h("div.spinner")));
@@ -175,68 +197,58 @@ App.pages.health = {
 };
 
 // =================================================================== Settings
-function overlayCard(ov) {
-  ov.mode = ov.mode || "full"; ov.size = ov.size || "m"; ov.fps_color = ov.fps_color || "auto";
-  if (ov.opacity == null) ov.opacity = 0.85;
-  const box = h("div.card");
-  const STYLES = [["full", "Full stats (CPU, GPU, RAM)"], ["fps", "FPS counter: number only"], ["fps_low", "FPS counter: + 1% low"],
-    ["fps_time", "FPS counter: + frame time"], ["fps_detail", "FPS counter: detailed (1% low, frame time, game)"], ["fps_graph", "FPS counter: + frame-time graph"]];
-  let moving = false;
-  const moveBtn = h("button.btn.sm", { onclick: async () => {
-    const r = await App.api.overlay_edit(!moving); moving = !!r.edit; ov.enabled = true;
-    moveBtn.replaceChildren(icon(moving ? "check" : "move"), moving ? "Done moving" : "Move overlay");
-    toast(moving ? "Drag the overlay where you want it, then click Done" : "Position saved"); draw(); } }, icon("move"), "Move overlay");
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+/* Display: text size, start page and animations. (Themes and colours have their own Themes page.) */
+function displayCard(c) {
+  const ui = c.ui || (c.ui = {});
+  const box = h("div.card#display", { "data-anchor": "display" });
   const draw = () => {
-    const counter = ov.mode !== "full";
-    box.replaceChildren(cardHead("In-game overlay", "overlay"),
-      h("div.sub", "Small always-on-top stats box. Works over games in borderless/windowed mode (not exclusive fullscreen). Clicks pass straight through it, except while you're moving it."),
-      h("div.opt", h("div.t", "Show overlay"), switchEl(ov.enabled, v => { ov.enabled = v; })),
-      h("div.opt", h("div.t", "Style"), h("select", { "aria-label": "Overlay style", onchange: e => { ov.mode = e.target.value; draw(); } },
-        STYLES.map(([k, l]) => h("option", { value: k, selected: ov.mode === k }, l)))),
-      !counter ? h("div.opt", h("div", h("div.t", "Show FPS"), h("div.d", "Adds an FPS row (FPS, 1% low, frame time) for the game in front, measured with PresentMon.")),
-        switchEl(!!ov.show_fps, v => { ov.show_fps = v; })) : h("div.small.muted", { style: { padding: "2px 0 8px" } }, "FPS is measured with PresentMon only while the overlay is showing. The counter hides itself when no game is in front."),
-      h("div.opt", h("div.t", "Text size"), h("select", { "aria-label": "Overlay text size", onchange: e => { ov.size = e.target.value; } },
-        [["s", "Small"], ["m", "Medium"], ["l", "Large"], ["xl", "Extra large"]].map(([k, l]) => h("option", { value: k, selected: ov.size === k }, l)))),
-      h("div.opt", h("div.t", "FPS colour"), h("select", { "aria-label": "FPS colour", onchange: e => { ov.fps_color = e.target.value; } },
-        [["auto", "By performance (green / yellow / red)"], ["white", "White"], ["accent", "Cyan"]].map(([k, l]) => h("option", { value: k, selected: ov.fps_color === k }, l)))),
-      h("div", { style: { padding: "6px 0" } }, sliderRow("Background", 0, 100, Math.round(ov.opacity * 100), 5, "%", v => { ov.opacity = v / 100; })),
-      h("div.opt", h("div", h("div.t", "Position"), h("div.d", ov.x != null ? "Where you dragged it" : "Corner: " + (ov.corner || "top-left"))),
-        h("div.row", { style: { gap: "6px" } }, moveBtn,
-          h("select", { "aria-label": "Snap overlay to a corner", onchange: async e => { if (!e.target.value) return; ov.corner = e.target.value; ov.x = ov.y = null; await App.api.overlay_corner(e.target.value); toast("Snapped to " + e.target.value); draw(); } },
-            h("option", { value: "" }, "Snap to corner…"), ["top-left", "top-right", "bottom-left", "bottom-right"].map(k => h("option", { value: k }, k))))),
-      h("div.small.faint", "Style, size, colour and background apply when you press Save."));
+    const cur = Theme.cur;
+    box.replaceChildren(cardHead("Display", "monitor"),
+      h("div.opt", h("div", h("div.t", "Text size"), h("div.d", "Makes all text, buttons and cards bigger or smaller. Also on the Aa button at the top.")),
+        h("div.seg", TEXT_SIZES.map(([v, l]) => h("button" + (+cur.text_scale === v ? ".on" : ""), { "aria-pressed": +cur.text_scale === v,
+          onclick: () => { ui.text_scale = v; Theme.set({ text_scale: v }); draw(); } }, l)))),
+      h("div.opt", h("div", h("div.t", "Reduce animations"), h("div.d", "Shows simple fades instead of moving effects (like the health dial filling up). RigLab also follows Windows' own 'Animation effects' setting.")),
+        switchEl(!!cur.reduce_motion, (v) => { ui.reduce_motion = v; Theme.set({ reduce_motion: v }); })),
+      h("div.opt", h("div", h("div.t", "Open RigLab on"), h("div.d", "The page you see when the app starts.")),
+        h("select", { onchange: e => { ui.start_page = e.target.value; App.api.ui_set({ start_page: e.target.value }); } },
+          [["home", "Home"], ["dashboard", isSimple() ? "PC Health" : "Dashboard"], ["last", "Last page I used"]].map(([v, l]) => h("option", { value: v, selected: (ui.start_page || "home") === v }, l)))),
+      h("div.small.muted", { style: { paddingTop: "8px" } }, "Themes and colours are on the ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("themes"); } }, "Themes"), " page."));
   };
   draw();
   return box;
 }
 
-function appearanceCard(c) {
-  const ui = c.ui || (c.ui = { theme: "dark", accent: "cyan", start_page: "home" });
-  const box = h("div.card");
-  const draw = () => {
-    const modes = [["dark", "Dark", "#0b0e14", "#161b26"], ["light", "Light", "#f7f8fb", "#ffffff"], ["system", "Match Windows", "linear-gradient(90deg,#0b0e14 50%,#f7f8fb 50%)", ""]];
-    box.replaceChildren(cardHead("Appearance", "sliders"),
-      h("div.sub", "Changes apply instantly."),
-      h("div.small.muted", { style: { margin: "6px 0 8px" } }, "Mode"),
-      h("div.row.wrap", { style: { gap: "10px" } }, modes.map(([k, l, bg, fg]) => h("div.theme-mode" + (ui.theme === k ? ".on" : ""), { role: "button", tabIndex: 0, "aria-pressed": ui.theme === k,
-        onclick: () => { ui.theme = k; Theme.set({ theme: k }); draw(); } },
-        h("div.pv", { style: { background: bg } }, fg ? h("div", { style: { margin: "10px", height: "24px", borderRadius: "5px", background: fg, border: "1px solid rgba(128,128,128,.25)" } }) : null), h("b.small", l)))),
-      h("div.small.muted", { style: { margin: "16px 0 8px" } }, "Colour theme"),
-      h("div.row.wrap", { style: { gap: "12px" } }, Object.entries(THEME_ACCENTS).map(([k, l]) => {
-        const pal = { cyan: ["#36d6ff", "#8f6bff"], violet: ["#a37bff", "#ff5fb8"], emerald: ["#2fe0a0", "#2fb5ff"], amber: ["#ffb636", "#ff6b3d"], crimson: ["#ff4d6d", "#ff9a3d"], ocean: ["#4d8dff", "#36d6ff"], mono: ["#c7cedb", "#7d8799"] }[k];
-        return h("div", { style: { textAlign: "center" } }, h("div.theme-swatch" + (ui.accent === k ? ".on" : ""), { role: "button", tabIndex: 0, title: l, "aria-label": l + " colour theme", "aria-pressed": ui.accent === k,
-          style: { background: `linear-gradient(135deg, ${pal[0]}, ${pal[1]})` }, onclick: () => { ui.accent = k; Theme.set({ accent: k }); draw(); } }), h("div.small.muted", { style: { marginTop: "4px" } }, l));
-      })),
-      h("div.opt", { style: { marginTop: "14px" } }, h("div", h("div.t", "Open RigLab on"), h("div.d", "The page you see when the app starts.")),
-        h("select", { onchange: e => { ui.start_page = e.target.value; App.api.ui_set({ start_page: e.target.value }); } },
-          [["home", "Home"], ["dashboard", "Dashboard"], ["last", "Last page I used"]].map(([v, l]) => h("option", { value: v, selected: (ui.start_page || "home") === v }, l)))));
+function helpCard() {
+  const box = h("div.card", { "data-anchor": "startup" });
+  const draw = async () => {
+    let w = { on: false }, a = { on: false };
+    try { w = await App.api.weekly_state(); a = await App.api.autostart_state(); } catch { /* preview */ }
+    box.replaceChildren(cardHead("Start-up, help and regular checks", "info"),
+      h("div.opt", h("div", h("div.t", "Walkthrough"), h("div.d", "A short tour of the main screen.")),
+        h("button.btn.sm", { onclick: () => Tour.start() }, icon("play"), "Replay the walkthrough")),
+      h("div.opt", h("div", h("div.t", "Tips"), h("div.d", "The tips at the top of each page, including ones you chose not to show again.")),
+        h("button.btn.sm", { onclick: async () => { await Tips.reset(); toast("Tips will show again on each page"); } }, icon("refresh"), "Show tips again")),
+      switchRow("autostart.set", a.on, async (v) => { const r = await App.api.autostart_set(v); toast(r.msg, !r.ok); return !!r.ok; },
+        { always: true, desc: "Starts RigLab in the tray when you sign in, so your lights, fans and overlay come back after a restart." }),
+      switchRow("weekly.set", w.on, async (v) => { const r = await App.api.weekly_set(v); toast(r.msg, !r.ok); return !!r.ok; },
+        { always: true, desc: "Runs a quick check every Sunday at 7 pm and shows your score in a notification. Off unless you turn it on." }));
   };
   draw();
   return box;
+}
+
+function creditsList() {
+  return details("Credits and licences", h("div.small", { style: { lineHeight: 1.7 } },
+    THEMES.filter(([, , c]) => /licen/i.test(c)).map(([, n, c]) => h("div", h("b", n), " - ", c)),
+    h("div.muted", "All theme palettes are used under the MIT licence, which allows use in commercial software with credit."),
+    h("div", { style: { marginTop: "6px" } }, h("b", "Icons"), " - the Undo, star, back-arrow and help icons are from Lucide (lucide.dev), ISC licence. Other icons are RigLab's own."),
+    h("div", h("b", "Speed test"), " - uses Cloudflare's speed test servers (speed.cloudflare.com).")));
 }
 
 function viewCard() {
-  const box = h("div.card.glow");
+  const box = h("div.card.glow", { "data-anchor": "view" });
   const draw = () => {
     const S = isSimple();
     const b = (v, l) => h("button" + ((v === "simple") === S ? ".on" : ""), { "aria-pressed": (v === "simple") === S, onclick: () => setView(v) }, l);
@@ -253,11 +265,11 @@ function viewCard() {
 App.pages.settings = {
   async render(el) {
     const c = await App.api.settings();
-    const a = c.alerts, ov = c.overlay, S = isSimple();
+    const a = c.alerts, S = isSimple();
     const save = async () => { await App.api.save_settings(c); try { App.info = await App.api.info(); } catch { /* keep old */ } toast("Settings saved"); };
     el.append(pageHead("Settings", null, h("button.btn.primary", { onclick: save }, icon("check"), "Save")));
     el.append(viewCard());
-    el.append(h("div.mt", appearanceCard(c)));
+    el.append(h("div.mt", displayCard(c)));
     const general = [
       h("div.opt", h("div", h("div.t", S ? "Keep RigLab running when I close the window" : "Keep running in the tray"), h("div.d", S ? "Temperature warnings and your fan settings keep working. RigLab sits by the clock." : "Closing the window keeps alerts and fan curves working.")), switchEl(c.minimize_to_tray, v => { c.minimize_to_tray = v; })),
       h("div.opt", h("div", h("div.t", S ? "Start hidden by the clock" : "Start minimised")), switchEl(c.start_minimized, v => { c.start_minimized = v; }))];
@@ -273,27 +285,27 @@ App.pages.settings = {
         h("div.row.mt", h("button.btn", { onclick: () => App.api.open_folder("data") }, icon("folder"), S ? "Open RigLab's folder" : "Open data folder"))];
     if (S) {
       el.append(h("div.grid.g2.mt",
-        h("div.card", cardHead("Too-hot warnings", "thermo"), h("div.sub", "A Windows pop-up warns you when something gets too hot. These limits also decide when lights turn yellow and red."),
+        h("div.card", { "data-anchor": "alerts" }, cardHead("Too-hot warnings", "thermo"), h("div.sub", "A Windows pop-up warns you when something gets too hot. These limits also decide when lights turn yellow and red."),
           h("div.opt", h("div.t", "Warn me"), switchEl(a.enabled, v => { a.enabled = v; })),
           details("Change the limits",
             h("div.stack", { style: { gap: "14px" } },
               sliderRow("Processor", 60, 105, a.cpu_temp_max, 1, "°C", v => { a.cpu_temp_max = v; }),
               sliderRow("Graphics card", 60, 100, a.gpu_temp_max, 1, "°C", v => { a.gpu_temp_max = v; }),
               sliderRow("Drives", 40, 80, a.drive_temp_max, 1, "°C", v => { a.drive_temp_max = v; })))),
-        overlayCard(ov),
         h("div.card", cardHead("General", "gear"), ...general, details("Technical settings", ...technical)),
-        h("div.card", cardHead("About", "info"), ...about)));
+        h("div.card", cardHead("About", "info"), ...about, creditsList()),
+        helpCard()));
       return;
     }
     el.append(h("div.grid.g2.mt",
-      h("div.card", cardHead("Temperature alerts", "thermo"), h("div.sub", "A Windows notification pops up when something gets too hot."),
+      h("div.card", { "data-anchor": "alerts" }, cardHead("Temperature alerts", "thermo"), h("div.sub", "A Windows notification pops up when something gets too hot."),
         h("div.opt", h("div.t", "Alerts on"), switchEl(a.enabled, v => { a.enabled = v; })),
         h("div.stack.mt", { style: { gap: "14px" } },
           sliderRow("CPU", 60, 105, a.cpu_temp_max, 1, "°C", v => { a.cpu_temp_max = v; }),
           sliderRow("GPU", 60, 100, a.gpu_temp_max, 1, "°C", v => { a.gpu_temp_max = v; }),
           sliderRow("Drives", 40, 80, a.drive_temp_max, 1, "°C", v => { a.drive_temp_max = v; }))),
-      overlayCard(ov),
       h("div.card", cardHead("General", "gear"), ...general, ...technical),
-      h("div.card", cardHead("About", "info"), ...about)));
+      h("div.card", cardHead("About", "info"), ...about, creditsList()),
+      helpCard()));
   },
 };

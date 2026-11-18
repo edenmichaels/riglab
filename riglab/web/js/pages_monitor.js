@@ -31,23 +31,93 @@ const PcLights = {
   },
 };
 
-/* The report card under the dial: one line per check from the last quick check, with a button where there's a fix. */
+/* The report card under the dial: one line per check, worst first, with Fix it / Open buttons. Live while a check runs. */
 function healthReport() {
   const box = h("div");
   let mounted = false;
   const draw = () => {
     if (mounted && !box.isConnected) { Health.subs.delete(draw); return; }
     if (box.isConnected) mounted = true;
-    const r = Health.last;
-    if (Health.running) { box.replaceChildren(h("div.empty", h("div.spinner"), h("div.mt", "Checking your PC…"))); return; }
-    if (!r || !r.items) { box.replaceChildren(h("div.empty.small", "No report yet. Press “Run a quick check” to get one.")); return; }
+    const job = Health.job || {}, r = Health.last;
+    const live = Health.running && job.items;
+    const items = live ? job.items : r && r.items;
+    const parts = [];
+    if (job.kind === "repair" && job.running) parts.push(banner("info", "info", `<b>Repairing: ${job.step}</b> - ${job.eta_text || "working"}. You can keep using your PC.`,
+      h("button.btn.sm", { onclick: () => Health.cancel() }, "Cancel")));
+    if (!items || !items.length) {
+      parts.push(Health.running ? h("div.empty", h("div.spinner"), h("div.mt", "Starting the check…"))
+        : h("div.empty.small", "No report yet. Run a quick check to get one."));
+      box.replaceChildren(...parts);
+      return;
+    }
     const order = { bad: 0, warn: 1, good: 2, none: 3 };
-    const items = [...r.items].sort((a, b) => order[a.state] - order[b.state]);
-    box.replaceChildren(...items.map(i => h("div.report-item", dot(i.state, (XD.legend || {})[i.state]),
-      h("div", { style: { minWidth: 0 } }, h("div.tl-name", i.title), h("div.small.muted", i.say)),
-      i.page && i.fix ? h("button.btn.sm" + (i.state === "bad" ? ".primary" : ""), { onclick: () => go(i.page) }, i.fix) : null)),
-      h("div.small.muted", { style: { paddingTop: "10px" } }, `Quick check · ${new Date(r.time * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}. ` +
-        "The full check (virus scan, Windows file check and more) is coming in a later update."));
+    const sorted = [...items].sort((a, b) => order[a.state] - order[b.state]);
+    for (const i of sorted) {
+      const btns = [];
+      if (i.action) btns.push(actionBtn("fix." + i.action.id, () => Health.fix(i.action.id), { cls: "sm" + (i.state === "bad" ? ".primary" : ""), label: i.action.label, always: true }));
+      else if (i.page && i.fix) btns.push(h("button.btn.sm" + (i.state === "bad" ? ".primary" : ""), { onclick: () => go(i.page) }, i.fix));
+      parts.push(h("div.report-item", dot(i.state, (XD.legend || {})[i.state]),
+        h("div", { style: { minWidth: 0 } }, h("div.tl-name", i.title), h("div.small.muted", i.say),
+          i.lines && i.state !== "good" ? h("ul.pp-list.small.muted", i.lines.map(l => h("li", l))) : null,
+          i.details ? details(isSimple() ? "Show details" : "Technical details", h("pre.log", String(i.details))) : null),
+        h("div.row", { style: { gap: "6px" } }, btns)));
+    }
+    if (live) parts.push(h("div.small.muted", { style: { paddingTop: "10px" } }, "More results appear as each check finishes."));
+    else if (r) parts.push(h("div.row.wrap", { style: { paddingTop: "12px", gap: "10px" } },
+      h("span.small.muted", `${r.kind === "full" ? "Full check" : "Quick check"} · ${new Date(r.time * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}`),
+      h("div.spacer"),
+      actionBtn("health.save", async () => { const x = await App.api.health_save_text(); toast(x.msg, !x.ok); }, { cls: "sm", icon: "download" }),
+      actionBtn("health.print", () => printReport(r), { cls: "sm", icon: "report" })));
+    box.replaceChildren(...parts);
+  };
+  Health.subs.add(draw);
+  draw();
+  return box;
+}
+
+/* PDF: the print window (choose "Microsoft Print to PDF"). Built from the same report as the text file. */
+function printReport(r) {
+  const esc = (t) => String(t ?? "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  const words = { good: "Good", warn: "Worth checking", bad: "Needs fixing", none: "Not checked / skipped" };
+  const colours = { good: "#1a8f4c", warn: "#b07800", bad: "#c62a3a", none: "#777" };
+  const order = { bad: 0, warn: 1, good: 2, none: 3 };
+  const rows = [...(r.items || [])].sort((a, b) => order[a.state] - order[b.state]).map(i =>
+    `<tr><td style="color:${colours[i.state]};font-weight:700;white-space:nowrap">● ${words[i.state]}</td><td><b>${esc(i.title)}</b><br>${esc(i.say)}</td></tr>`).join("");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>RigLab health report</title><style>
+    body{font:14px/1.5 Segoe UI,Arial,sans-serif;color:#111;margin:32px} h1{margin:0 0 4px} table{border-collapse:collapse;width:100%;margin-top:18px}
+    td{border-top:1px solid #ddd;padding:8px;vertical-align:top} .score{font-size:40px;font-weight:800;color:${colours[r.state] || "#111"}}</style></head><body>
+    <h1>PC health report</h1><div>${r.kind === "full" ? "Full check" : "Quick check"} · ${esc(new Date(r.time * 1000).toLocaleString())} · RigLab ${esc(App.info.version)}</div>
+    <p><span class="score">${r.score ?? "-"}</span> / 100<br><b>${esc(r.summary)}</b></p><table>${rows}</table>
+    <p style="color:#666;font-size:12px;margin-top:20px">Good = nothing to do. Worth checking = not urgent. Needs fixing = take a look soon. Skipped items don't change the score.</p></body></html>`;
+  const f = h("iframe", { style: { position: "fixed", width: "0", height: "0", border: "0", right: "0", bottom: "0" } });
+  document.body.append(f);
+  f.contentDocument.open(); f.contentDocument.write(html); f.contentDocument.close();
+  setTimeout(() => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch (e) { toast("Couldn't open the print window: " + e, true); } setTimeout(() => f.remove(), 60000); }, 300);
+  toast("In the print window, choose “Microsoft Print to PDF” to save a PDF.");
+}
+
+/* Score over time (each check is one point). */
+function healthChart() {
+  const c = h("canvas.chart", { style: { height: "180px" } });
+  const note = h("div.small.muted");
+  const box = h("div", c, note);
+  let mounted = false;
+  const draw = () => {
+    if (mounted && !box.isConnected) { Health.subs.delete(draw); return; }
+    if (box.isConnected) mounted = true;
+    const hist = Health.history || [];
+    if (hist.length < 2) { note.textContent = hist.length ? "Run another check to start the chart." : "Your score is added here each time you run a check."; c.style.display = "none"; return; }
+    c.style.display = "";
+    const now = Date.now() / 1000;
+    const data = hist.map(p => [-(now - p.time) / 86400, p.score]);
+    note.textContent = `${hist.length} checks. Days ago along the bottom, score up the side. The dotted lines are where the colours change (80 and 50).`;
+    requestAnimationFrame(() => {
+      const xMin = Math.min(-1, data[0][0]);
+      const g = drawChart(c, [{ data, color: css("--accent") }, { data: [[xMin, 80], [0, 80]], color: css("--good"), dash: true, width: 1 },
+        { data: [[xMin, 50], [0, 50]], color: css("--warn"), dash: true, width: 1 }], { yMin: 0, yMax: 100, xMin, xMax: 0, xLabel: "days ago", yLabel: "score" });
+      const [ctx] = fitCanvas(c);
+      for (const [x, y] of data) { ctx.beginPath(); ctx.arc(g.X(x), g.Y(y), 4, 0, Math.PI * 2); ctx.fillStyle = css(y >= 80 ? "--good" : y >= 50 ? "--warn" : "--bad"); ctx.fill(); }
+    });
   };
   Health.subs.add(draw);
   draw();
@@ -55,9 +125,13 @@ function healthReport() {
 }
 
 function healthTop() {
-  return h("div.grid", { style: { gridTemplateColumns: "minmax(280px, 380px) minmax(0, 1fr)", alignItems: "start" } },
-    h("div.card", { style: { paddingTop: "24px" } }, healthDial(), h("div.mt", colourKey())),
-    h("div.card", cardHead(isSimple() ? "Report card" : "Health report (quick check)", "report"), healthReport()));
+  return h("div", h("div.grid", { style: { gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 340px), 1fr))", alignItems: "start" } },
+    h("div.stack", { style: { gap: "16px" } },
+      h("div.card", { style: { paddingTop: "24px" } }, healthDial({ both: true }), h("div.mt", colourKey())),
+      h("div.card", cardHead("Score over time", "pulse"), healthChart())),
+    h("div.card", cardHead(isSimple() ? "Report card" : "Health report", "report",
+      infoTip("The quick check looks at temperatures, memory, space, fans, drives, crashes, virus protection, devices, and your keyboard, mouse, screens, sound, network and USB. The full check adds a virus scan, a check of Windows' own files, driver ages and Windows updates. Grey items were skipped and don't change the score.", "What's checked?")),
+      healthReport())));
 }
 
 App.pages.dashboard = {
@@ -71,9 +145,17 @@ App.pages.dashboard = {
       el.append(healthTop());
       this.lightsBox = h("div");
       this.overall = h("div.row", { style: { gap: "12px" } });
-      el.append(h("div.card.mt", cardHead("Right now", "pulse", this.overall), h("div.small.muted", "These readings update every second."), this.lightsBox,
-        h("div.mt", colourKey())));
-      el.append(h("div.card.mt", cardHead("Things you can do", "rocket"), h("div.row.wrap", { style: { gap: "10px" } },
+      // four live dials (the shared Gauge): one key fact each; every other reading is behind "Show details"
+      this.live = [
+        ["cpu_temp", "Processor", "°C", STOPS.temp, 100], ["gpu_temp", "Graphics", "°C", STOPS.temp, 100],
+        ["cpu_load", "Processor use", "%", null, 100], ["gpu_load", "Graphics use", "%", null, 100]].map(([k, label, unit, stops, max]) => {
+        const g = Gauge.create({ kind: "arc", size: 130, unit, stops, max, label });
+        return { k, g, el: h("div.live-g", g.el, h("div.small.muted", label)) };
+      });
+      el.append(h("div.card.mt", { "data-anchor": "live" }, cardHead("Right now", "pulse", this.overall, colourKey()),
+        h("div.live-gauges", this.live.map(x => x.el)),
+        details("Show details", h("div.small.muted", "These readings update every second."), this.lightsBox)));
+      el.append(details("Things you can do", h("div.row.wrap", { style: { gap: "10px" } },
         actionBtn("tweaks.recommended", async () => { const r = await App.api.tweaks_recommended(); toast(r.msg, !r.ok); }, { cls: "primary", icon: "rocket" }),
         h("button.btn", { onclick: () => go("tweaks") }, icon("trash"), "Free up space"),
         h("button.btn", { onclick: () => go("cooling") }, icon("fan"), "Change how my fans behave"),
@@ -111,7 +193,7 @@ App.pages.dashboard = {
     };
     this.cpu = mk("cpu", cpuName, "cpu", "Clock");
     this.gpu = mk("gpu", gpuName, "gpu", "Hot spot");
-    el.append(h("div.grid.g2", this.cpu, this.gpu));
+    el.append(h("div.grid", { "data-anchor": actions ? "live" : null, style: { gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 440px), 1fr))" } }, this.cpu, this.gpu));
 
     const tile = (title, ic, id, extra) => h("div.card", cardHead(title, ic), h("div.stat-big", { id }, "—"),
       extra, h("canvas.spark#" + id + "-spark", { style: { marginTop: "8px" } }));
@@ -135,6 +217,10 @@ App.pages.dashboard = {
     const items = await refreshHealth();
     this.alerts.innerHTML = "";
     for (const n of (await App.api.startup_notes()) || []) {
+      if (n.kind === "light") {             // after-boot lighting rescan couldn't find a device: same quiet note in both views
+        this.alerts.append(banner("info", "light", n.text, h("button.btn.sm", { onclick: () => go("lighting") }, "Open Lights")));
+        continue;
+      }
       if (isSimple()) {     // tuning notices are Advanced detail; crashes are worth a plain heads-up
         if (n.kind === "bad") this.alerts.append(banner("bad", "alert", "<b>Your PC crashed or restarted by itself recently.</b> RigLab can show you why.",
           h("button.btn.sm", { onclick: () => go("crashes") }, "Find out why")));
@@ -156,6 +242,7 @@ App.pages.dashboard = {
     if (this.lightsBox && document.body.contains(this.lightsBox)) {
       PcLights.load();
       this.lightsBox.replaceChildren(...PcLights.rows(snap).map(([k, v, o]) => lightRow(k, v, o || {})));
+      for (const x of this.live || []) x.g.follow(s[x.k]);
       const o = PcLights.overall(snap);
       this.overall.replaceChildren(dot(o.state), h("b", o.say));
     }
