@@ -206,6 +206,8 @@ async function refreshHealth() {
   } catch { return []; }
 }
 
+const WEB_VERSION = "3.11.0";      // must match APP_VERSION in riglab/core/config.py (checked by a test)
+
 async function start() {
   if (window.pywebview && window.pywebview.api) { App.api = window.pywebview.api; }
   else { App.api = new DemoApi(); App.demo = true; }
@@ -214,7 +216,11 @@ async function start() {
   Theme.apply({ theme: ui.theme || Theme.cur.theme, accent: ui.accent || Theme.cur.accent, text_scale: ui.text_scale || 1, reduce_motion: !!ui.reduce_motion });
   App.view = (App.info.view || ui.view) === "advanced" ? "advanced" : "simple";
   buildShell();
-  $("#ver").textContent = "v" + App.info.version;
+  $("#ver").textContent = "v" + (App.info.version || WEB_VERSION);
+  if (!App.demo && App.info.version && App.info.version !== WEB_VERSION) {
+    // the program and its screens don't match (old screens kept by the window's browser): say so plainly
+    $("#main").before(h("div.mt", banner("bad", "alert", `<b>RigLab's screens are out of date</b> (screens ${WEB_VERSION}, program ${App.info.version}). Right-click RigLab in the system tray, choose Quit, then open RigLab again.`)));
+  }
   const start = ui.start_page || "home";
   let first = start;
   if (start === "last") { try { first = localStorage.getItem("riglab.page") || "home"; } catch { first = "home"; } }

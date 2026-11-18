@@ -353,3 +353,39 @@ def test_speed_test_uses_windows_ping_when_it_answers(tmp_path, monkeypatch):
     a.netspeed_start()
     r = _wait(a)["result"]
     assert r["ping"] == 10 and r["jitter"] == 2.0 and r["loss"] == 10.0
+
+
+# ------------------------------------------------------------------ old screens after an update
+def test_window_cache_is_cleared_but_saved_choices_are_kept(tmp_path):
+    from riglab.core import webcache
+    prof = tmp_path / "EBWebView" / "Default"
+    for d in ("Cache/Cache_Data", "Code Cache/js", "GPUCache", "Service Worker/CacheStorage", "Local Storage/leveldb"):
+        (prof / d).mkdir(parents=True)
+        (prof / d / "f").write_text("x")
+    gone = webcache.clear(tmp_path)
+    assert not (prof / "Cache").exists() and not (prof / "Code Cache").exists() and not (prof / "GPUCache").exists()
+    assert not (prof / "Service Worker" / "CacheStorage").exists()
+    assert (prof / "Local Storage" / "leveldb" / "f").exists()          # theme/page choices stay
+    assert len(gone) == 4
+    assert webcache.clear(tmp_path / "missing") == []
+
+
+def test_screens_version_matches_program_version():
+    import re
+    from pathlib import Path
+    from riglab.core.config import APP_VERSION
+    js = (Path(__file__).resolve().parents[1] / "riglab" / "web" / "js" / "app.js").read_text(encoding="utf-8")
+    assert re.search(r'const WEB_VERSION = "([^"]+)"', js).group(1) == APP_VERSION
+    demo = (Path(__file__).resolve().parents[1] / "riglab" / "web" / "js" / "demo.js").read_text(encoding="utf-8")
+    assert f'version: "{APP_VERSION}"' in demo
+
+
+def test_lights_page_says_what_the_after_restart_check_found():
+    from riglab.api import boot_words
+    assert boot_words(None) is None
+    assert boot_words({"first_since_boot": False}) is None
+    assert "checking" in boot_words({"first_since_boot": True, "running": True})["say"]
+    ok = boot_words({"first_since_boot": True, "rescan": {"found": ["kb", "ram"], "missing": [], "reapplied": True}})
+    assert ok["state"] == "good" and "found 2 devices" in ok["say"] and "reapplied" in ok["say"]
+    miss = boot_words({"first_since_boot": True, "rescan": {"found": ["kb"], "missing": ["fans"], "reapplied": True}})
+    assert miss["state"] == "warn" and "fans" in miss["say"]

@@ -296,7 +296,9 @@ class DemoApi {
       stats: { fps: 30, leds, frames: 0, errors: 0 }, devices: devs, state: this.lightState ||= { effect: "Rainbow sweep", color: "#00c8ff", color2: "#ff00a0", speed: 1, brightness: 1 },
       effects: Object.keys(EFFECT_INFO).filter(e => e !== "Off").concat(["Off"]), palettes: Object.keys(FX_PALETTES), fan_types: { "LL120 / LL140": 16, "QL120 / QL140": 34, "HD120 RGB": 12, "ML120 / ML140 Pro RGB": 4, "SP120 RGB Elite": 8, "Lighting Node LED strip": 10, "LS100 strip (250 mm)": 15 },
       orders: ["RGB", "RBG", "GRB", "GBR", "BRG", "BGR"], exe: "C:\\Program Files\\OpenRGB\\OpenRGB.exe", port: 6743,
-      setup: devs.flatMap(d => d.zones.filter(z => z.unconfirmed).map(z => ({ key: d.key, zone: z.name }))) };
+      setup: devs.flatMap(d => d.zones.filter(z => z.unconfirmed).map(z => ({ key: d.key, zone: z.name }))),
+      boot: starting ? { state: "none", say: "Windows just started, so RigLab is checking for your lights (this can take up to a minute)." }
+        : { state: "good", say: `After the restart RigLab checked for your lights, found ${devs.length} devices and reapplied your last effect.` } };
   }
   gtCaps() {
     return this.gt ||= { core_offset: { min: -500, max: 500, step: 5, value: 0, default: 0, label: "Core clock offset", unit: "MHz", help: "Shifts the whole boost curve. Raise in +15-30 MHz steps and test each step." },

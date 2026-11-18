@@ -609,7 +609,8 @@ class Api:
                 "effects": [x for x in EFFECTS if x != "Off"] + ledmap.SPATIAL_EFFECTS + list(fx.EFFECTS) + ["Off"],
                 "palettes": list(fx.PALETTES),
                 "fan_types": CORSAIR_LED_COUNTS, "orders": list(ORDERS), "exe": h.exe(), "port": PORT,
-                "setup": [{"key": d["key"], "zone": z["name"]} for d in devs for z in d["zones"] if z.get("unconfirmed")]}
+                "setup": [{"key": d["key"], "zone": z["name"]} for d in devs for z in d["zones"] if z.get("unconfirmed")],
+                "boot": boot_words(getattr(self._app, "boot_info", None))}
 
     def light_reset(self):
         """Called every time the Lighting page opens."""
@@ -1502,6 +1503,23 @@ def _size(b):
         if b < 1024 or u == "GB":
             return f"{b:.0f} {u}" if u == "bytes" else f"{b:.1f} {u}"
         b /= 1024
+
+
+def boot_words(b):
+    """One plain line for the Lights page about the after-restart check (None when there's nothing to say)."""
+    if not b or not b.get("first_since_boot"):
+        return None
+    if b.get("running"):
+        return {"state": "none", "say": "Windows just started, so RigLab is checking for your lights (this can take up to a minute)."}
+    r = b.get("rescan")
+    if not r:
+        return None
+    n = len(r.get("found") or [])
+    if r.get("missing"):
+        return {"state": "warn", "say": f"After the restart RigLab found {n} lighting device{'s' if n != 1 else ''} but not: "
+                f"{', '.join(r['missing'])}. Check it's plugged in, then press Rescan."}
+    again = " and reapplied your last effect" if r.get("reapplied") else ""
+    return {"state": "good", "say": f"After the restart RigLab checked for your lights, found {n} device{'s' if n != 1 else ''}{again}."}
 
 
 APPEARANCE_KEYS = {"theme": "theme", "accent": "highlight colour", "text_scale": "text size", "reduce_motion": "animations"}

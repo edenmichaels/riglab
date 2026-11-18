@@ -69,6 +69,7 @@ class App:
         self.gpu_result = None
         self.tray = None
         self._quitting = False
+        self.boot_info = None          # set by _boot_rescan: what the after-boot lighting check found
 
     # ------------------------------------------------------------------ run
     def run(self):
@@ -85,8 +86,12 @@ class App:
         self._start_tray()
         from .core import instance
         instance.serve(self.quit, self.weekly_check)
-        webview.start(self._after_start, private_mode=False, storage_path=str((app_dir() / "webview") if getattr(sys, "frozen", False) else (project_root() / ".webview")),
-                      debug="--debug" in sys.argv)
+        storage = (app_dir() / "webview") if getattr(sys, "frozen", False) else (project_root() / ".webview")
+        from .core import webcache
+        gone = webcache.clear(storage)          # never show screens left over from an older version (see webcache.py)
+        if gone:
+            log.info("cleared %d saved web cache folders", len(gone))
+        webview.start(self._after_start, private_mode=False, storage_path=str(storage), debug="--debug" in sys.argv)
         self.shutdown()
 
     def _after_start(self):
@@ -163,11 +168,15 @@ class App:
         if now_boot is not None:
             sysd["last_boot"] = now_boot
             self.config.save()
-        self.boot_info = {"first_since_boot": first, "rescan": None}
+        self.boot_info = {"first_since_boot": first, "rescan": None, "running": False, "time": time.time()}
         if not first or self.light.paused or not self.config["openrgb"].get("autostart", True):
             return
         log.info("first start since boot: rescanning lighting (expecting %s)", self.light.L.get("known_devices"))
-        res = boot.rescan_and_reapply(self.light, quitting=lambda: self._quitting)
+        self.boot_info["running"] = True
+        try:
+            res = boot.rescan_and_reapply(self.light, quitting=lambda: self._quitting)
+        finally:
+            self.boot_info["running"] = False
         self.boot_info["rescan"] = res
         if not res.get("reapplied"):
             log.warning("couldn't reapply lighting after boot")
